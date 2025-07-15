@@ -11,7 +11,6 @@ from urllib import error, parse, request
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(stdout)],
 )
 
@@ -19,7 +18,7 @@ parser = ArgumentParser(
     "Cloudflare DDNS Updater",
     "ddns-py <INTERFACE> <EVENT>",
     "DDNS with your IPv6 address script with \
-    'NetworkManager up / connectivity-change' events.",
+    'NetworkManager up / connectivity-change / dns-change' events.",
 )
 
 parser.add_argument(
@@ -190,7 +189,8 @@ def main():
         logging.error("Configuration is empty or invalid.")
         exit(1)
 
-    sleep(10)  # Wait for the network to stabilize
+    logging.info("Waiting for network to stabilize..., 10s")
+    sleep(10)
     ipv6_addresses = get_ipv6_addresses()
     if not ipv6_addresses:
         logging.error("No global IPv6 addresses found.")
