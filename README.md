@@ -11,7 +11,7 @@ Firstly, create a config file `config.json` at /etc/NetworkManager/dispatcher.d/
   "email": "",
   "zone_id": "",
   "api_key": "",
-  "domain_to_bind": ".cloud0310.cn"
+  "domain_to_bind": ""
 }
 ```
 
@@ -20,10 +20,16 @@ where
 `zone_id` can be obtained with
 
 ```bash
-curl https://api.cloudflare.com/client/v4/zones -H "X-Auth-Email: $CLOUDFLARE_EMAIL" -H "Authorization: Bearer $CLOUDFLARE_API_KEY"
+curl 'https://api.cloudflare.com/client/v4/zones' -H "X-Auth-Email: $CLOUDFLARE_EMAIL" -H "Authorization: Bearer $CLOUDFLARE_API_KEY"
 ```
 
 `domain_to_bind` should be the DDNS domain you want to bind to.
+
+To get help info of the script
+
+```bash
+ddns-py --help
+```
 
 To manually trigger the script once. Please make sure the script's permission is executable, then you can use the command.
 
