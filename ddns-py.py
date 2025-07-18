@@ -15,7 +15,7 @@ logging.basicConfig(
 )
 
 parser = ArgumentParser(
-    "Cloudflare DDNS Updater",
+    "Cloudflare NetworkManager DDNS Updater",
     "ddns-py <INTERFACE> <EVENT>",
     "DDNS with your IPv6 address script with \
     'NetworkManager up / connectivity-change / dns-change' events.",
@@ -141,7 +141,7 @@ class CloudFlareDDNS:
             return False
 
 
-def get_ipv6_addresses() -> list[IPv6Address] | None:
+def get_global_ipv6_addresses() -> list[IPv6Address] | None:
     """Get a list of IPv6 addresses for the local machine."""
     addr_info: list[
         tuple[
@@ -189,9 +189,9 @@ def main():
         logging.error("Configuration is empty or invalid.")
         exit(1)
 
-    logging.info("Waiting for network to stabilize..., 10s")
-    sleep(10)
-    ipv6_addresses = get_ipv6_addresses()
+    logging.info("Waiting for network to stabilize..., 5s")
+    sleep(5)
+    ipv6_addresses = get_global_ipv6_addresses()
     if not ipv6_addresses:
         logging.error("No global IPv6 addresses found.")
         exit(1)
@@ -208,7 +208,7 @@ def main():
         record_name=config["domain_to_bind"],
     )
     dns_record = DDNS_client.get_dns_record(name=config["domain_to_bind"])
-    if dns_record is None:
+    if dns_record is None or dns_record == []:
         DDNS_client.add_dns_record(
             name=config["domain_to_bind"], content=str(ipv6_address)
         )
