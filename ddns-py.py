@@ -5,6 +5,7 @@ import logging
 import socket
 from argparse import ArgumentParser
 from ipaddress import IPv6Address
+from os import environ
 from sys import exit, stdout
 from time import sleep
 from urllib import error, parse, request
@@ -52,6 +53,7 @@ class CloudFlareDDNS:
     ) -> dict | None:
         body = json.dumps(data).encode("utf-8") if data else None
 
+        logging.info(f"Using proxy {environ.get('http_proxy', 'None')}")
         req = request.Request(url, method=method, data=body)
         for key, value in self.headers.items():
             req.add_header(key, value)
@@ -181,9 +183,10 @@ def main():
     args = parser.parse_args()
     INTERFACE = args.INTERFACE.strip()
     ACTION = args.ACTION.strip()
+    CONFIG_PATH = "/etc/NetworkManager/dispatcher.d/ddns/config.json"
 
     logging.info(f"Interface: {INTERFACE}, Action: {ACTION}")
-    config = load_config("/etc/NetworkManager/dispatcher.d/ddns/config.json")
+    config = load_config(CONFIG_PATH)
 
     if not config:
         logging.error("Configuration is empty or invalid.")
@@ -208,11 +211,12 @@ def main():
         record_name=config["domain_to_bind"],
     )
     dns_record = DDNS_client.get_dns_record(name=config["domain_to_bind"])
-    if dns_record is None or dns_record == []:
+
+    if dns_record is None or dns_record == []:  # if record not found
         DDNS_client.add_dns_record(
             name=config["domain_to_bind"], content=str(ipv6_address)
         )
-    else:
+    else:  # found record, update it if necessary
         record = dns_record[0]
         record_address = record["content"]
         if record_address != str(ipv6_address):
