@@ -5,7 +5,6 @@ import logging
 import socket
 from argparse import ArgumentParser
 from ipaddress import IPv6Address
-from os import environ
 from sys import exit, stdout
 from time import sleep
 from urllib import error, parse, request
@@ -35,7 +34,14 @@ parser.add_argument(
 
 
 class CloudFlareDDNS:
-    def __init__(self, auth_email: str, auth_key: str, zone_id: str, record_name: str):
+    def __init__(
+        self,
+        auth_email: str,
+        auth_key: str,
+        zone_id: str,
+        record_name: str,
+        proxy: str | None = None,
+    ):
         self.auth_email = auth_email
         self.auth_key = auth_key
         self.zone_id = zone_id
@@ -47,18 +53,27 @@ class CloudFlareDDNS:
             "Authorization": "Bearer " + auth_key,
             "Content-Type": "application/json",
         }
+        self.proxy = proxy
 
     def _send_request(
         self, url: str, method: str, data: dict | None = None
     ) -> dict | None:
         body = json.dumps(data).encode("utf-8") if data else None
 
-        logging.info(f"Using proxy {environ.get('http_proxy', 'None')}")
-        req = request.Request(url, method=method, data=body)
-        for key, value in self.headers.items():
-            req.add_header(key, value)
+        if isinstance(self.proxy, str):
+            logging.info(f"Using proxy: {self.proxy}")
+            proxy_handler = request.ProxyHandler(
+                {
+                    "http": self.proxy,
+                    "https": self.proxy,
+                }
+            )
+            opener = request.build_opener(proxy_handler)
+            request.install_opener(opener)
+
+        req = request.Request(url, method=method, data=body, headers=self.headers)
         try:
-            with request.urlopen(req) as response:
+            with request.urlopen(req, timeout=10) as response:
                 if response.status == 200:
                     return json.loads(response.read().decode("utf-8"))
                 else:
@@ -209,6 +224,7 @@ def main():
         auth_key=config["api_key"],
         zone_id=config["zone_id"],
         record_name=config["domain_to_bind"],
+        proxy=config["proxy"],
     )
     dns_record = DDNS_client.get_dns_record(name=config["domain_to_bind"])
 
