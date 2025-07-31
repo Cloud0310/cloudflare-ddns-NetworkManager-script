@@ -7,6 +7,7 @@ from argparse import ArgumentParser
 from ipaddress import IPv6Address
 from sys import exit, stdout
 from time import sleep
+from typing import Any
 from urllib import error, parse, request
 
 logging.basicConfig(
@@ -17,8 +18,10 @@ logging.basicConfig(
 parser = ArgumentParser(
     "Cloudflare NetworkManager DDNS Updater",
     "ddns-py <INTERFACE> <EVENT>",
-    "DDNS with your IPv6 address script with \
-    'NetworkManager up / connectivity-change / dns-change' events.",
+    (
+        "DDNS with your IPv6 address script with \ 'NetworkManager"
+        "up / connectivity-change / dns-change' events."
+    ),
 )
 
 parser.add_argument(
@@ -28,7 +31,6 @@ parser.add_argument(
 parser.add_argument(
     "ACTION",
     type=str,
-    choices=["up", "connectivity-change", "dns-change"],
     help="NetworkManager action to trigger the script.",
 )
 
@@ -89,7 +91,7 @@ class CloudFlareDDNS:
             logging.error(f"JSON decode error: {e.msg}")
             return None
 
-    def get_dns_record(self, name: str) -> list | None:
+    def get_dns_record(self, name: str) -> list[dict[str, Any]] | None:
         """get DNS records for a given name and type.
 
         Args:
@@ -181,7 +183,7 @@ def get_global_ipv6_addresses() -> list[IPv6Address] | None:
     return global_ipv6_addresses if global_ipv6_addresses else None
 
 
-def load_config(config_path: str = "config.json") -> dict:
+def load_config(config_path: str = "config.json") -> dict[str, Any]:
     """Load configuration from a JSON file."""
     try:
         with open(config_path, "r") as file:
@@ -209,15 +211,17 @@ def main():
 
     logging.info("Waiting for network to stabilize..., 5s")
     sleep(5)
+
     ipv6_addresses = get_global_ipv6_addresses()
-    if not ipv6_addresses:
+    if ipv6_addresses is not None:
+        logging.info(
+            f"Global IPv6 addresses: {', '.join(str(addr) for addr in ipv6_addresses)}"
+        )
+        ipv6_address = ipv6_addresses[0]  # Use the first global IPv6 address
+        logging.info(f"Using IPv6 address: {ipv6_address}")
+    else:
         logging.error("No global IPv6 addresses found.")
         exit(1)
-    logging.info(
-        f"Global IPv6 addresses: {', '.join(str(addr) for addr in ipv6_addresses)}"
-    )
-    ipv6_address = ipv6_addresses[0]  # Use the first global IPv6 address
-    logging.info(f"Using IPv6 address: {ipv6_address}")
 
     DDNS_client = CloudFlareDDNS(
         auth_email=config["email"],
@@ -228,7 +232,7 @@ def main():
     )
     dns_record = DDNS_client.get_dns_record(name=config["domain_to_bind"])
 
-    if dns_record is None or dns_record == []:  # if record not found
+    if dns_record is None or dns_record == []:  # no records
         DDNS_client.add_dns_record(
             name=config["domain_to_bind"], content=str(ipv6_address)
         )
@@ -237,7 +241,10 @@ def main():
         record_address = record["content"]
         if record_address != str(ipv6_address):
             logging.info(
-                f"Updating DNS record {config['domain_to_bind']} from {record_address} to {ipv6_address}"
+                (
+                    f"Updating DNS record {config['domain_to_bind']}"
+                    "from {record_address} to {ipv6_address}"
+                )
             )
             DDNS_client.update_dns_record(
                 record_id=record["id"],
@@ -246,7 +253,10 @@ def main():
             )
         else:
             logging.info(
-                f"DNS record {config['domain_to_bind']} is already up-to-date with {ipv6_address}"
+                (
+                    f"DNS record {config['domain_to_bind']} is "
+                    "already up-to-date with {ipv6_address}"
+                )
             )
 
 
