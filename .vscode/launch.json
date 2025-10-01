@@ -12,8 +12,11 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": [
-                "wlan0", "up"
-            ]
+                "wlp4s0", "up"
+            ],
+            "env": {
+                "DEBUG": "1"
+            }
         }
     ]
 }

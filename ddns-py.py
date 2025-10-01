@@ -2,9 +2,10 @@
 
 import json
 import logging
-import socket
 from argparse import ArgumentParser
-from ipaddress import IPv6Address
+from ipaddress import IPv4Address, IPv6Address, ip_address
+from os import getcwd, getenv
+from subprocess import check_output
 from sys import exit, stdout
 from time import sleep
 from typing import Any
@@ -19,7 +20,7 @@ parser = ArgumentParser(
     "Cloudflare NetworkManager DDNS Updater",
     "ddns-py <INTERFACE> <EVENT>",
     (
-        "DDNS with your IPv6 address script with \ 'NetworkManager"
+        "DDNS with your IPv6 address script with 'NetworkManager"
         "up / connectivity-change / dns-change' events."
     ),
 )
@@ -63,7 +64,7 @@ class CloudFlareDDNS:
         body = json.dumps(data).encode("utf-8") if data else None
 
         if isinstance(self.proxy, str):
-            logging.info(f"Using proxy: {self.proxy}")
+            logging.info(f"Using API request proxy: {self.proxy}")
             proxy_handler = request.ProxyHandler(
                 {
                     "http": self.proxy,
@@ -96,7 +97,6 @@ class CloudFlareDDNS:
 
         Args:
             name (str, optional): the DNS name to query.
-            dns_type (str, optional): Defaults to "AAAA".
 
         Returns:
             list | None: a list of DNS records if found, None otherwise
@@ -106,45 +106,20 @@ class CloudFlareDDNS:
         response: dict | None = self._send_request(url, "GET")
         return response.get("result") if response else None
 
-    def update_dns_record(self, record_id: str, record_name: str, content: str) -> bool:
-        """update a DNS record with the given content.
-
-        Args:
-            record_id (str): the ID of the DNS record to update
-            content (str): updated content for the DNS record
-
-        Returns:
-            bool: True if the update was successful, False otherwise
-        """
-        url = f"{self.endpoint}/{record_id}"
-        data = {
-            "type": "AAAA",
-            "name": record_name,
-            "content": content,
-            "ttl": 1200,
-            "proxied": False,
-        }
-
-        response: dict | None = self._send_request(url, "PUT", data)
-        if response and response.get("success"):
-            logging.info(f"DNS record updated successfully: {content}")
-            return True
-        else:
-            logging.error("Failed to update DNS record")
-            return False
-
-    def add_dns_record(self, name: str, content: str) -> bool:
+    def add_dns_record(self, name: str, ip_version: str, content: str) -> bool:
         """add a new DNS record with the given name and content.
 
         Args:
-            name (str): the DNS name to add
+            name: (str): the DNS name to add, e.g. "example.com"
+            ip_version (str): "A" for IPv4 or "AAAA" for IPv6, must be within ["A", "AAAA"]
             content (str): content for the new DNS record
 
         Returns:
             bool: True if the addition was successful, False otherwise
         """
+
         data = {
-            "type": "AAAA",
+            "type": ip_version,
             "name": name,
             "content": content,
             "ttl": 1200,
@@ -159,28 +134,54 @@ class CloudFlareDDNS:
             logging.error("Failed to add DNS record")
             return False
 
+    def delete_dns_record(self, record_id: str) -> bool:
+        """delete a DNS record by its ID.
 
-def get_global_ipv6_addresses() -> list[IPv6Address] | None:
-    """Get a list of IPv6 addresses for the local machine."""
-    addr_info: list[
-        tuple[
-            socket.AddressFamily,
-            socket.SocketKind,
-            int,
-            str,
-            tuple[str, int] | tuple[str, int, int, int] | tuple[int, bytes],
-        ]
-    ] = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET6)
+        Args:
+            record_id (str): the ID of the DNS record to delete
 
-    all_ip_addresses: list[IPv6Address] = [
-        IPv6Address(info[4][0]) for info in addr_info
+        Returns:
+            bool: True if the deletion was successful, False otherwise
+        """
+        url = f"{self.endpoint}/{record_id}"
+        response: dict | None = self._send_request(url, "DELETE")
+        if response and response.get("success"):
+            logging.info(f"DNS record {record_id} deleted successfully.")
+            return True
+        else:
+            logging.error(f"Failed to delete DNS record {record_id}.")
+            return False
+
+
+def get_global_ip_addresses(interface: str) -> list[IPv4Address | IPv6Address]:
+    """get global (public) IPv4 and IPv6 addresses for a given network interface.
+
+    Args:
+        interface (str): the network interface to query, e.g. "eth0"
+
+    Returns:
+        IPAddresses: a dataclass containing lists of global IPv4 and IPv6 addresses
+    """
+    out = check_output(
+        args=["/usr/bin/ip", "-j", "addr", "show", interface],
+    )  # use 'ip -json addr show' to get all IP addresses in JSON format, more reliable than socket.getaddrinfo
+    data: list[dict[str, Any]] = json.loads(out)
+    addr_infos: list[list[dict[str, Any]]] = [
+        addr_info for iface in data for addr_info in iface.get("addr_info", [])
+    ]  # flatten the list of lists
+
+    global_ip_addresses = [
+        ip_address(addr_info["local"])
+        for addr_info in addr_infos
+        if not ip_address(addr_info["local"]).is_private
     ]
 
-    global_ipv6_addresses = list(
-        filter(lambda v6_addr: v6_addr.is_global, set(all_ip_addresses)),
-    )
+    if any(isinstance(ip, IPv4Address) for ip in global_ip_addresses) is False:
+        logging.warning("No global IPv4 address found.")
+    if any(isinstance(ip, IPv6Address) for ip in global_ip_addresses) is False:
+        logging.warning("No global IPv6 address found.")
 
-    return global_ipv6_addresses if global_ipv6_addresses else None
+    return global_ip_addresses
 
 
 def load_config(config_path: str = "config.json") -> dict[str, Any]:
@@ -200,64 +201,62 @@ def main():
     args = parser.parse_args()
     INTERFACE = args.INTERFACE.strip()
     ACTION = args.ACTION.strip()
-    CONFIG_PATH = "/etc/NetworkManager/dispatcher.d/ddns/config.json"
+    CONFIG_PATH = getcwd() + "/ddns/config.json"
 
-    logging.info(f"Interface: {INTERFACE}, Action: {ACTION}")
+    logging.info(
+        f"Interface: {INTERFACE}, Action: {ACTION}, config path: {CONFIG_PATH}"
+    )
     config = load_config(CONFIG_PATH)
 
     if not config:
         logging.error("Configuration is empty or invalid.")
         exit(1)
 
-    logging.info("Waiting for network to stabilize..., 5s")
-    sleep(5)
+    if not getenv("DEBUG") == "1":
+        logging.info("Waiting for network to stabilize..., 5s")
+        sleep(5)
 
-    ipv6_addresses = get_global_ipv6_addresses()
-    if ipv6_addresses is not None:
-        logging.info(
-            f"Global IPv6 addresses: {', '.join(str(addr) for addr in ipv6_addresses)}"
-        )
-        ipv6_address = ipv6_addresses[0]  # Use the first global IPv6 address
-        logging.info(f"Using IPv6 address: {ipv6_address}")
-    else:
-        logging.error("No global IPv6 addresses found.")
+    ip_addresses = get_global_ip_addresses(INTERFACE)
+
+    if ip_addresses == []:
+        logging.error("No global IP addresses found to bind.")
         exit(1)
+    else:
+        logging.info(f"Found global IP addresses {ip_addresses}")
 
     DDNS_client = CloudFlareDDNS(
         auth_email=config["email"],
         auth_key=config["api_key"],
         zone_id=config["zone_id"],
         record_name=config["domain_to_bind"],
-        proxy=config["proxy"],
+        proxy=config["api_request_proxy"],
     )
+
     dns_record = DDNS_client.get_dns_record(name=config["domain_to_bind"])
 
-    if dns_record is None or dns_record == []:  # no records
-        DDNS_client.add_dns_record(
-            name=config["domain_to_bind"], content=str(ipv6_address)
+    # if these is existing DNS record(s), delete them first then update all with new IP address(es) to KEEP the DNS records in sync with current IP address(es)
+    is_no_dns_record = True if (dns_record is None or dns_record == []) else False
+
+    if not is_no_dns_record:
+        logging.info(f"Existing DNS records found: {dns_record}, deleting them first.")
+        for record in dns_record:
+            record_id = record["id"]
+            if record_id:
+                success = DDNS_client.delete_dns_record(record_id=record_id)
+                if not success:
+                    logging.error(f"Failed to delete DNS record with ID: {record_id}")
+
+    # add new DNS records with current IP addresses
+    for ip in ip_addresses:
+        ip_version = "A" if isinstance(ip, IPv4Address) else "AAAA"
+        logging.info(f"Adding new record {config['domain_to_bind']} -> {ip}")
+        success = DDNS_client.add_dns_record(
+            name=config["domain_to_bind"],
+            ip_version=ip_version,
+            content=str(ip),
         )
-    else:  # found record, update it if necessary
-        record = dns_record[0]
-        record_address = record["content"]
-        if record_address != str(ipv6_address):
-            logging.info(
-                (
-                    f"Updating DNS record {config['domain_to_bind']}"
-                    "from {record_address} to {ipv6_address}"
-                )
-            )
-            DDNS_client.update_dns_record(
-                record_id=record["id"],
-                record_name=config["domain_to_bind"],
-                content=str(ipv6_address),
-            )
-        else:
-            logging.info(
-                (
-                    f"DNS record {config['domain_to_bind']} is "
-                    "already up-to-date with {ipv6_address}"
-                )
-            )
+        if not success:
+            logging.error("Failed to add new DNS record.")
 
 
 if __name__ == "__main__":

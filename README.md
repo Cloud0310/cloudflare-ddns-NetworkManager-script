@@ -4,17 +4,28 @@ A Python Script to update Cloudflare DDNS record to current machine's IPv6 Addre
 
 ## Usage
 
-Firstly, create a config file `config.json` at directory `/etc/NetworkManager/dispatcher.d/ddns/`
+### Get your cloudflare API key
+
+To get started with this project, you should get yourself a cloudflare API key
+at [create API keys](https://dash.cloudflare.com/profile/api-tokens) first.
+
+Just click the create token button, then choose "Edit zone DNS" template, choose
+the dns zone you need to bind your IP address with.
+
+After getting your API, create a config file `config.json` at directory `/etc/NetworkManager/dispatcher.d/ddns/`
+
 ```json
 {
   "email": "",
   "zone_id": "",
   "api_key": "",
-  "domain_to_bind": ""
+  "domain_to_bind": "",
+  "api_request_proxy": "" # optional, support socks5 or http proxy, for accessing Cloudflare
+  API endpoint, won't affect the IP address getted.
 }
 ```
-where
-`email` should be your cloudflare account's email
+
+where `email` should be your cloudflare account's email
 `zone_id` can be obtained with
 
 ```bash
@@ -26,6 +37,7 @@ curl 'https://api.cloudflare.com/client/v4/zones' \
 `domain_to_bind` should be the DDNS domain you want to bind to.
 
 To get help info of the script:
+
 ```bash
 ddns-py --help
 ```
