@@ -20,8 +20,7 @@ After getting your API, create a config file `config.json` at directory `/etc/Ne
   "zone_id": "",
   "api_key": "",
   "domain_to_bind": "",
-  "api_request_proxy": "" # optional, support socks5 or http proxy, for accessing Cloudflare
-  API endpoint, won't affect the IP address getted.
+  "api_request_proxy": "", // optional, support socks5 or http proxy, for accessing Cloudflare API endpoint, won't affect the IP address getted.
 }
 ```
 
