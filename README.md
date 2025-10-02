@@ -14,7 +14,7 @@ the dns zone you need to bind your IP address with.
 
 After getting your API, create a config file `config.json` at directory `/etc/NetworkManager/dispatcher.d/ddns/`
 
-```json
+```jsonc
 {
   "email": "",
   "zone_id": "",
