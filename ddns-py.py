@@ -4,7 +4,7 @@ import json
 import logging
 from argparse import ArgumentParser
 from ipaddress import IPv4Address, IPv6Address, ip_address
-from os import getcwd, getenv
+from os import getenv
 from subprocess import check_output
 from sys import exit, stdout
 from time import sleep
@@ -201,7 +201,7 @@ def main():
     args = parser.parse_args()
     INTERFACE = args.INTERFACE.strip()
     ACTION = args.ACTION.strip()
-    CONFIG_PATH = getcwd() + "/ddns/config.json"
+    CONFIG_PATH = "/etc/NetworkManager/dispatcher.d/ddns/config.json"
 
     logging.info(
         f"Interface: {INTERFACE}, Action: {ACTION}, config path: {CONFIG_PATH}"
