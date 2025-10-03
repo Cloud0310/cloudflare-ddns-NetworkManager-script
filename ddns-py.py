@@ -180,7 +180,7 @@ def get_global_ip_addresses(interface: str = None) -> list[IPv4Address | IPv6Add
     global_ip_addresses = [
         ip_address(addr_info["local"])
         for addr_info in addr_infos
-        if not ip_address(addr_info["local"]).is_private and not addr_info["deprecated"]
+        if not ip_address(addr_info["local"]).is_private or addr_info.get("deprecated")
     ]
 
     if any(isinstance(ip, IPv4Address) for ip in global_ip_addresses) is False:
@@ -229,7 +229,7 @@ def main():
         logging.error("No global IP addresses found to bind.")
         exit(1)
     else:
-        logging.info(f"Found global IP addresses {str(ip_addresses)}")
+        logging.info(f"Found global IP addresses {str(*ip_addresses)}")
 
     DDNS_client = CloudFlareDDNS(
         auth_email=config["email"],
