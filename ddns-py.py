@@ -180,7 +180,9 @@ def get_global_ip_addresses(interface: str) -> list[IPv4Address | IPv6Address]:
     global_ip_addresses = [
         ip_address(addr_info["local"])
         for addr_info in addr_infos
-        if not ip_address(addr_info["local"]).is_private or addr_info.get("deprecated")
+        if not (
+            ip_address(addr_info["local"]).is_private or addr_info.get("deprecated")
+        )
     ]
 
     if any(isinstance(ip, IPv4Address) for ip in global_ip_addresses) is False:
