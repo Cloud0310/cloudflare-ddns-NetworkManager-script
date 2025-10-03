@@ -229,7 +229,7 @@ def main():
         logging.error("No global IP addresses found to bind.")
         exit(1)
     else:
-        logging.info(f"Found global IP addresses {str(*ip_addresses)}")
+        logging.info(f"Found global IP addresses {ip_addresses}")
 
     DDNS_client = CloudFlareDDNS(
         auth_email=config["email"],
