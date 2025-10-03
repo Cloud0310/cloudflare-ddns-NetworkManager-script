@@ -122,7 +122,7 @@ class CloudFlareDDNS:
             "type": ip_version,
             "name": name,
             "content": content,
-            "ttl": 1200,
+            "ttl": 1,  # Setting to 1 means 'automatic'
             "proxied": False,
         }
 
