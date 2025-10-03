@@ -153,7 +153,7 @@ class CloudFlareDDNS:
             return False
 
 
-def get_global_ip_addresses(interface: str = None) -> list[IPv4Address | IPv6Address]:
+def get_global_ip_addresses(interface: str) -> list[IPv4Address | IPv6Address]:
     """get global (public) IPv4 and IPv6 addresses for a given network interface.
 
     Args:
@@ -164,7 +164,7 @@ def get_global_ip_addresses(interface: str = None) -> list[IPv4Address | IPv6Add
     """
     # use 'ip -json addr show' to get all IP addresses in JSON format, more reliable than socket.getaddrinfo
     args: list[str] = ["/usr/bin/ip", "-j", "addr", "show"]
-    if interface is None or interface == "":
+    if interface == "" or interface == "none":
         logging.warning("No network interface specified, check all the interfaces.")
         out = check_output(args)
     else:
