@@ -1,54 +1,113 @@
-# Cloudflare DDNS NetworkManager dispatcher script
+# Cloudflare DDNS for NetworkManager
 
-A Python Script to update Cloudflare DDNS record to current machine's IPv6 Address, with only python stdlib
+A lightweight, dependency-free Python script that automatically updates your Cloudflare DNS records with your machine's public IP addresses. It's designed to run as a [NetworkManager dispatcher](https://networkmanager.dev/docs/api/latest/NetworkManager-dispatcher.html) script, making it ideal for servers or desktops with dynamic IPs.
+
+## Features
+
+- **Automatic Updates**: Integrates seamlessly with NetworkManager to update DNS records on network events (like `up`, `connectivity-change`).
+- **IPv4 and IPv6 Support**: Automatically detects and syncs both public IPv4 (A records) and IPv6 (AAAA records).
+- **No External Dependencies**: Uses only the Python standard library. No `pip install` required.
+- **Robust IP Detection**: Reliably finds global IP addresses using the modern `ip -j addr` command.
+- **Proxy Support**: Can route Cloudflare API requests through an HTTP or SOCKS5 proxy.
+- **Efficient**: Only updates Cloudflare if it detects that your IP address has actually changed.
+
+## Prerequisites
+
+- A Linux system using NetworkManager.
+- Python 3.6+ installed.
+- The `iproute2` package (which provides the `ip` command), which is standard on most modern Linux distributions.
+- A Cloudflare account and a domain managed by it.
+
+## Installation
+
+1.  **Place the Script and Make it Executable**
+
+    Copy the `ddns-py` script to the NetworkManager dispatcher directory. It's good practice to name it in a way that controls execution order, for example, `99-cf-ddns`.
+
+    ```bash
+    sudo cp ddns-py /etc/NetworkManager/dispatcher.d/99-cf-ddns
+    ```
+  > [!note]
+  > The script must have execute permissions to be run by NetworkManager.
+
+1.  **Create the Configuration Directory**
+
+    The script looks for its configuration in a subdirectory.
+
+    ```bash
+    sudo mkdir -p /etc/NetworkManager/dispatcher.d/ddns
+    ```
+
+2.  **Create the Configuration File**
+
+    Create your configuration file at `/etc/NetworkManager/dispatcher.d/ddns/config.json`.
+
+    ```bash
+    sudo nano /etc/NetworkManager/dispatcher.d/ddns/config.json
+    ```
+
+    Paste and fill out the following template:
+
+    ```json
+    {
+      "email": "your-cloudflare-email@example.com",
+      "zone_id": "your_zone_id_from_cloudflare",
+      "api_key": "your_cloudflare_api_token",
+      "domain_to_bind": "subdomain.yourdomain.com",
+      "api_request_proxy": ""
+    }
+    ```
+
+## Configuration Details
+
+- **`email`**: The email address associated with your Cloudflare account.
+- **`api_key`**: Your Cloudflare API Token.
+  - Go to **My Profile > API Tokens** > **[Create Token](https://dash.cloudflare.com/profile/api-tokens)**.
+  - Use the "**Edit zone DNS**" template.
+  - Under "Zone Resources", select the specific zone you want to grant access to.
+  - Create the token and copy the key.
+- **`zone_id`**: The ID of the DNS zone containing your domain. You can find this on the "Overview" page for your domain in the Cloudflare dashboard, or by running this command:
+  ```bash
+  curl -X GET "https://api.cloudflare.com/client/v4/zones" \
+       -H "X-Auth-Email: YOUR_CLOUDFLARE_EMAIL" \
+       -H "Authorization: Bearer YOUR_CLOUDFLARE_API_TOKEN"
+  ```
+- **`domain_to_bind`**: The full DNS record name you want to update (e.g., `home.example.com`).
+- **`api_request_proxy`** (Optional): If you need to use a proxy to reach the Cloudflare API, specify it here.
+  - Format: `http://user:pass@host:port` or `socks5://host:port`.
+  - Leave as an empty string (`""`) if not needed.
 
 ## Usage
 
-### Get your cloudflare API key
+### Automatic (via NetworkManager)
 
-To get started with this project, you should get yourself a cloudflare API key
-at [create API keys](https://dash.cloudflare.com/profile/api-tokens) first.
+Once installed and configured, the script will run automatically whenever NetworkManager detects a relevant network change. No further action is needed.
 
-Just click the create token button, then choose "Edit zone DNS" template, choose
-the dns zone you need to bind your IP address with.
+### Manual Execution (for Testing)
 
-After getting your API, create a config file `config.json` at directory `/etc/NetworkManager/dispatcher.d/ddns/`
+You can trigger the script manually to test your configuration. NetworkManager normally passes two arguments: the interface and the action. 
 
-```jsonc
-{
-  "email": "",
-  "zone_id": "",
-  "api_key": "",
-  "domain_to_bind": "",
-  "api_request_proxy": "", // optional, support socks5 or http proxy, for accessing Cloudflare API endpoint, won't affect the IP address getted.
-}
-```
-
-where `email` should be your cloudflare account's email
-`zone_id` can be obtained with
+> [!note]
+> The debug config should be located at `.\ddns\config.json`
 
 ```bash
-curl 'https://api.cloudflare.com/client/v4/zones' \
-        -H "X-Auth-Email: $CLOUDFLARE_EMAIL" \
-        -H "Authorization: Bearer $CLOUDFLARE_API_KEY"
+# Example: Manually trigger for the 'eth0' interface with an 'up' event
+sudo ./ddns-py.py eth0 up
 ```
 
-`domain_to_bind` should be the DDNS domain you want to bind to.
-
-To get help info of the script:
+For more detailed logs during manual testing, set the `DEBUG` environment variable:
 
 ```bash
-ddns-py --help
+sudo DEBUG=1 ./ddns-py.py eth0 up
 ```
 
-To manually trigger the script once. Please make sure the script's permission is executable, then you can use the command.
+## Troubleshooting
+
+Logs from NetworkManager dispatcher scripts are typically sent to the system journal. You can view them with `journalctl` or `systemctl status NetworkManager-dispatcher`.
 
 ```bash
-ddns-py <INTERFACE> <EVENT>
+# View the live logs from the NetworkManager dispatcher
+sudo journalctl -u NetworkManager-dispatcher.service -f
 ```
 
-To get the log for debug
-
-```bash
-sudo systemctl status NetworkManager-dispatcher.service
-```
+Look for output from the `99-cf-ddns` script to diagnose any issues.
