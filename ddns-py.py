@@ -136,7 +136,6 @@ class CloudFlareDDNS:
         """add a new DNS record with the given name and content.
 
         Args:
-            name: (str): the DNS name to add, e.g. "example.com"
             content (str): content for the new DNS record
 
         Returns:
@@ -317,7 +316,9 @@ def main():
     if ips_to_remove != set():
         with ProcessPoolExecutor() as pool:
             records_to_remove = [
-                record["id"] for record in dns_records if record["content"] in ips_to_remove
+                record["id"]
+                for record in dns_records
+                if record["content"] in ips_to_remove
             ]
             results = pool.map(
                 DDNS_client.delete_dns_record,
@@ -325,7 +326,9 @@ def main():
             )
             for record, success in zip(records_to_remove, results):
                 if not success:
-                    logging.error(f"Failed to delete DNS record with ID: {record['id']}")
+                    logging.error(
+                        f"Failed to delete DNS record with ID: {record['id']}"
+                    )
 
     if ips_to_add != set():
         with ProcessPoolExecutor() as pool:
