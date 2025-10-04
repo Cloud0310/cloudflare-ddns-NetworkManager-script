@@ -63,20 +63,22 @@ class CloudFlareDDNS:
         auth_email: str,
         auth_key: str,
         zone_id: str,
+        domain_name: str,
         proxy: str | None = None,
     ):
         self.auth_email = auth_email
         self.auth_key = auth_key
         self.zone_id = zone_id
-        self.endpoint = (
-            f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
-        ) # endpoint for managing DNS records
+        self.endpoint = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"  # endpoint for managing DNS records
         self.headers = {
             "X-Auth-Email": auth_email,
             "Authorization": "Bearer " + auth_key,
             "Content-Type": "application/json",
         }
         self.proxy = proxy
+        self.domain_name = domain_name
+        if self.proxy:
+            logging.info(f"Using proxy for API requests: {self.proxy}")
 
     def _send_request(
         self, url: str, method: str, data: dict | None = None
@@ -84,7 +86,6 @@ class CloudFlareDDNS:
         body = json.dumps(data).encode("utf-8") if data else None
 
         if isinstance(self.proxy, str):
-            logging.info(f"Using API request proxy: {self.proxy}")
             proxy_handler = request.ProxyHandler(
                 {
                     "http": self.proxy,
@@ -112,13 +113,10 @@ class CloudFlareDDNS:
             logging.error(f"JSON decode error: {e.msg}")
             return None
 
-    def get_dns_records(
-        self, name: str, type: str
-    ) -> list[dict[str, int | bool | str]] | None:
-        """get DNS records for a given name and type.
+    def get_dns_records(self, type: str) -> list[dict[str, int | bool | str]] | None:
+        """get DNS records for a given type.
 
         Args:
-            name (str): the DNS name to query.
             type (str): "A" for IPv4 or "AAAA" for IPv6, must be within ["A", "AAAA"]
 
         Returns:
@@ -129,12 +127,12 @@ class CloudFlareDDNS:
             logging.error("Invalid type, must be 'A' or 'AAAA'")
             return None
 
-        params = parse.urlencode({"name": name, "type": type})
+        params = parse.urlencode({"name": self.domain_name, "type": type})
         url = f"{self.endpoint}?{params}"
         response: dict | None = self._send_request(url, "GET")
         return response.get("result") if response else None
 
-    def add_dns_record(self, name: str, content: str) -> bool:
+    def add_dns_record(self, content: str) -> bool:
         """add a new DNS record with the given name and content.
 
         Args:
@@ -144,11 +142,11 @@ class CloudFlareDDNS:
         Returns:
             bool: True if the addition was successful, False otherwise
         """
-        logging.debug(f"Adding DNS record: {name} -> {content}")
+        logging.debug(f"Adding DNS record: {self.domain_name} -> {content}")
 
         data = {
             "type": ip_address(content).version == 4 and "A" or "AAAA",
-            "name": name,
+            "name": self.domain_name,
             "content": content,
             "ttl": 1,  # Setting to 1 means 'automatic'
             "proxied": False,
@@ -156,7 +154,9 @@ class CloudFlareDDNS:
 
         response: dict | None = self._send_request(self.endpoint, "POST", data)
         if response and response.get("success"):
-            logging.info(f"DNS record added successfully: {name} -> {content}")
+            logging.info(
+                f"DNS record added successfully: {self.domain_name} -> {content}"
+            )
             return True
         else:
             logging.error("Failed to add DNS record")
@@ -262,10 +262,10 @@ def main():
     console_handler = logging.StreamHandler(stdout)
     console_handler.setFormatter(CustomFormatter())
 
-    logger = logging.getLogger(__name__)
-
-    logger.setLevel(logging.DEBUG if IS_DEBUG else logging.INFO)
-    logger.addHandler(console_handler)
+    logging.basicConfig(
+        level=IS_DEBUG and logging.DEBUG or logging.INFO,
+        handlers=[console_handler],
+    )
 
     if not IS_DEBUG:
         logging.info("Waiting for network to stabilize..., 5s")
@@ -286,21 +286,18 @@ def main():
         logging.error("No global IP addresses found to bind.")
         exit(1)
     else:
-        logging.info(
-            f"Found global IP addresses {', '.join([ip_address for ip_address in ip_addresses])}"
-        )
+        logging.info(f"Found global IP addresses {', '.join(ip_addresses)}")
 
     DDNS_client = CloudFlareDDNS(
         auth_email=config["email"],
         auth_key=config["api_key"],
         zone_id=config["zone_id"],
+        domain_name=config["domain_to_bind"],
         proxy=config["api_request_proxy"],
     )
 
-    ipv4_records = DDNS_client.get_dns_records(name=config["domain_to_bind"], type="A")
-    ipv6_records = DDNS_client.get_dns_records(
-        name=config["domain_to_bind"], type="AAAA"
-    )
+    ipv4_records = DDNS_client.get_dns_records("A")
+    ipv6_records = DDNS_client.get_dns_records("AAAA")
     dns_records = (ipv4_records or []) + (ipv6_records or [])
 
     local_ips = {ip for ip in ip_addresses}
@@ -317,27 +314,25 @@ def main():
     ips_to_remove = ips_on_cloudflare - local_ips
 
     # Delete old DNS records that are no longer valid, in parallel
-    with ProcessPoolExecutor() as pool:
-        records_to_remove = [
-            record["id"] for record in dns_records if record["content"] in ips_to_remove
-        ]
-        results = pool.map(
-            DDNS_client.delete_dns_record,
-            records_to_remove,
-        )
-        for record, success in zip(records_to_remove, results):
-            if not success:
-                logging.error(f"Failed to delete DNS record with ID: {record['id']}")
+    if ips_to_remove != set():
+        with ProcessPoolExecutor() as pool:
+            records_to_remove = [
+                record["id"] for record in dns_records if record["content"] in ips_to_remove
+            ]
+            results = pool.map(
+                DDNS_client.delete_dns_record,
+                records_to_remove,
+            )
+            for record, success in zip(records_to_remove, results):
+                if not success:
+                    logging.error(f"Failed to delete DNS record with ID: {record['id']}")
 
-    # Add new DNS records for the new IP addresses, in parallel
-    with ProcessPoolExecutor() as pool:
-        results = pool.map(
-            DDNS_client.add_dns_record,
-            [[config["domain_to_bind"]] * len(ips_to_add), list(ips_to_add)],
-        )
-        for ip, success in zip(ips_to_add, results):
-            if not success:
-                logging.error(f"Failed to add DNS record for IP: {ip}")
+    if ips_to_add != set():
+        with ProcessPoolExecutor() as pool:
+            results = pool.map(DDNS_client.add_dns_record, ips_to_add)
+            for ip, success in zip(ips_to_add, results):
+                if not success:
+                    logging.error(f"Failed to add DNS record for IP: {ip}")
 
 
 if __name__ == "__main__":
