@@ -4,7 +4,7 @@ jobs:
   format-and-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: linter
         uses: astral-sh/ruff-action@v3
       - name: formater

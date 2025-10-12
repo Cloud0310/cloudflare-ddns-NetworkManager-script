@@ -1,0 +1,13 @@
+[project]
+name = "ddns-py"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "coverage[toml]>=7.10.7",
+]
+[tool.coverage.report]
+exclude_also = ["if __name__ == .__main__.:"]
+[tool.coverage.run]
+branch = true
