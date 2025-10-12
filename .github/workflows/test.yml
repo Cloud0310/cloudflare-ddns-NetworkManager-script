@@ -7,7 +7,7 @@ on:
     branches:
       - main
 jobs:
-  format-and-lint:
+  codecov-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -16,9 +16,9 @@ jobs:
       - name: Install dependencies
         run: uv sync
       - name: Run tests
-        run: uv run -m unittest discover -s tests
+        run: uv run -m unittest discover
       - name: Run coverage
-        run: uv run -m coverage xml
+        run: uv run -m coverage lcov ddns.py
       - name: Upload coverage reports to Codecov with GitHub Action
         uses: codecov/codecov-action@v5
         env:

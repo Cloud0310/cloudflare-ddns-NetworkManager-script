@@ -211,3 +211,4 @@ __marimo__/
 # Custom ignores
 ddns/config.json
 .vscode
+coverage.lcov
