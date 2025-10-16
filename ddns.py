@@ -51,14 +51,13 @@ class CustomFormatter(logging.Formatter):
         return formatter.format(record)
 
 
-def setup_logging(is_debug: bool):
+def setup_logging(is_debug: bool, logger: logging.Logger) -> None:
     """Setup logging configuration.
 
     Args:
         is_debug (bool): If True, set logging level to DEBUG, else INFO.
+        logger: The logger instance to configure.
     """
-    logger = logging.getLogger("ddns")
-
     log_level = logging.DEBUG if is_debug else logging.INFO
     handler = logging.StreamHandler(stdout)
     handler.setFormatter(CustomFormatter())
@@ -107,9 +106,10 @@ def parse_args(args: Sequence[str] | None = None) -> tuple[str, str, bool, str]:
     return args.INTERFACE.strip(), args.ACTION.strip(), is_debug, config_path
 
 
-def load_config(config_path: str = "config.json") -> Config:
+def load_config(logger: logging.Logger, config_path: str = "config.json") -> Config:
     """Load configuration from a JSON file.
     Args:
+        logger (logging.Logger): Logger instance for logging messages.
         config_path (str, optional): Path to the configuration file. Defaults to "config.json".
     Returns:
         Config: The loaded configuration as a Config object.
@@ -124,17 +124,17 @@ def load_config(config_path: str = "config.json") -> Config:
                 domain_to_bind=data["domain_to_bind"],
                 api_request_proxy=data.get("proxy"),
             )
-            logging.debug(f"Configuration loaded from {config_path}")
+            logger.debug(f"Configuration loaded from {config_path}")
             return config
     except FileNotFoundError:
-        logging.error(f"Configuration file {config_path} not found.")
+        logger.error(f"Configuration file {config_path} not found.")
         raise
     except json.JSONDecodeError as e:
-        logging.error(f"Error decoding JSON from {config_path}: {e.msg}")
+        logger.error(f"Error decoding JSON from {config_path}: {e.msg}")
         raise
 
 
-def get_global_ip_addresses(interface: str | None) -> list[str]:
+def get_global_ip_addresses(interface: str | None, logger: logging.Logger) -> list[str]:
     """Get global (public) IPv4 and IPv6 addresses for a given network interface.
 
     Args:
@@ -142,6 +142,7 @@ def get_global_ip_addresses(interface: str | None) -> list[str]:
 
     Returns:
         list[str]: a list of global IP addresses
+        logging.Logger: Logger instance for logging messages.
     """
     ip_route_path = which("ip")
     if not ip_route_path:
@@ -152,10 +153,10 @@ def get_global_ip_addresses(interface: str | None) -> list[str]:
     if (
         interface and interface != "none"
     ):  # Network Manager may pass "none" or "" as interface
-        logging.info(f"Checking IP addresses for interface: {interface}")
+        logger.info(f"Checking IP addresses for interface: {interface}")
         args.append(interface)
     else:
-        logging.warning("No network interface specified, check all the interfaces.")
+        logger.warning("No network interface specified, check all the interfaces.")
     try:
         out = check_output(args)
     except CalledProcessError as e:
@@ -176,9 +177,9 @@ def get_global_ip_addresses(interface: str | None) -> list[str]:
 
     # Warn if no global IPv4 or IPv6 address is found
     if not any(ip_address(ip).version == 4 for ip in global_ip_addresses):
-        logging.warning("No global IPv4 address found.")
+        logger.warning("No global IPv4 address found.")
     if not any(ip_address(ip).version == 6 for ip in global_ip_addresses):
-        logging.warning("No global IPv6 address found.")
+        logger.warning("No global IPv6 address found.")
 
     return global_ip_addresses
 
@@ -186,6 +187,7 @@ def get_global_ip_addresses(interface: str | None) -> list[str]:
 def build_api_request(
     config: Config,
     method: Literal["GET", "POST", "DELETE"],
+    logger: logging.Logger,
     subpath: dict[str, str] | None = None,
     params: str | None = None,
     data: dict[str, any] | None = None,
@@ -195,6 +197,7 @@ def build_api_request(
     Args:
         config (Config): Configuration object containing authentication details.
         method (Literal["GET", "POST", "DELETE"]): HTTP method.
+        logger (logging.Logger): Logger instance for logging messages.
         params (str | None): encoded URL parameters to append to the endpoint, optional.
         subpath (str | None): API endpoint subpath, optional.
         data (dict[str, any] | None, optional): The request payload, optional.
@@ -219,7 +222,7 @@ def build_api_request(
         )
         opener = request.build_opener(proxy_handler)
         request.install_opener(opener)
-        logging.info(f"Using proxy for API requests: {config.api_request_proxy}")
+        logger.info(f"Using proxy for API requests: {config.api_request_proxy}")
 
     endpoint = (
         f"https://api.cloudflare.com/client/v4/zones/{config.zone_id}/dns_records"
@@ -233,7 +236,9 @@ def build_api_request(
 
 
 # impure function to handle Network IO
-def parse_api_response(req: request.Request) -> dict[str, any] | None:
+def parse_api_response(
+    req: request.Request, logger: logging.Logger
+) -> dict[str, any] | None:
     """Open and parse the API response.
 
     Args:
@@ -241,64 +246,70 @@ def parse_api_response(req: request.Request) -> dict[str, any] | None:
 
     Returns:
         dict[str, any] | None: The reponse data in json format
+        logger (logging.Logger): Logger instance for logging messages.
     """
     try:
         with request.urlopen(req, timeout=5) as response:
             if response.status == 200:
                 return json.loads(response.read().decode("utf-8"))
             else:
-                logging.error(f"Error {response.status}: {response.reason}")
+                logger.error(f"Error {response.status}: {response.reason}")
                 return None
     except (error.HTTPError, error.URLError, json.JSONDecodeError) as e:
-        logging.error(f"API request error: {e}")
+        logger.error(f"API request error: {e}")
         return None
 
 
-def get_dns_records(config: Config) -> list[dict[str, int | bool | str]] | None:
+def get_dns_records(
+    config: Config, logger: logging.Logger
+) -> list[dict[str, int | bool | str]] | None:
     """Get DNS records of type "A" and "AAAA".
 
     Args:
         config (Config): Configuration object containing zone_id and domain_to_bind.
 
     Returns:
-        list | None: a list of DNS records if found, None otherwise
+        list | None: a list of DNS records if found, None otherwise.
+        logger (logging.Logger): Logger instance for logging messages.
     """
 
     params = parse.urlencode({"name": config.domain_to_bind})
 
     req: dict[str, any] | None = build_api_request(
         config,
-        "GET",
+        method="GET",
+        logger=logger,
         params=params,
     )
 
-    response = parse_api_response(req)
+    response = parse_api_response(req, logger)
 
     # fliter the records to only include A and AAAA types
     if response and response.get("success"):
         filtered_records = list(
             filter(lambda r: r["type"] in ("A", "AAAA"), response.get("result", []))
         )
-        logging.debug(
+        logger.debug(
             f"Fetched {len(filtered_records)} DNS records for {config.domain_to_bind}"
         )
         return filtered_records
     else:
-        logging.error("Failed to fetch DNS records")
+        logger.error("Failed to fetch DNS records")
         return None
 
 
-def add_dns_record(config: Config, content: str) -> bool:
+def add_dns_record(config: Config, content: str, logger: logging.Logger) -> bool:
     """Add a new DNS record with the given name and content.
 
     Args:
         config (Config): Configuration object containing authentication details.
         content (str): content for the new DNS, usually an IP address.
+        logger (logging.Logger): Logger instance for logging messages.
 
     Returns:
         bool: True if the addition was successful, False otherwise
     """
-    logging.debug(f"Adding DNS record: {config.domain_to_bind} -> {content}")
+    logger.debug(f"Adding DNS record: {config.domain_to_bind} -> {content}")
 
     data = {
         "type": "A" if ip_address(content).version == 4 else "AAAA",
@@ -308,37 +319,42 @@ def add_dns_record(config: Config, content: str) -> bool:
         "proxied": False,
     }
 
-    req = build_api_request(config, method="POST", subpath=None, params=None, data=data)
-    resp = parse_api_response(req)
+    req = build_api_request(
+        config, method="POST", subpath=None, params=None, data=data, logger=logger
+    )
+    resp = parse_api_response(req, logger)
 
     if resp and resp.get("success"):
-        logging.info(
+        logger.info(
             f"DNS record added successfully: {config.domain_to_bind} -> {content}"
         )
         return True
     else:
-        logging.error("Failed to add DNS record")
+        logger.error("Failed to add DNS record")
         return False
 
 
-def delete_dns_record(config: Config, record_id: str) -> bool:
+def delete_dns_record(config: Config, record_id: str, logger: logging.Logger) -> bool:
     """Delete a DNS record by its ID.
 
     Args:
         config (Config): Configuration object containing authentication details.
         record_id (str): the ID of the DNS record to delete
+        logger (logging.Logger): Logger instance for logging messages.
 
     Returns:
         bool: True if the deletion was successful, False otherwise
     """
-    logging.debug(f"Deleting DNS record with ID: {record_id}")
-    req = build_api_request(config, "DELETE", subpath=record_id, params=None)
-    response = parse_api_response(req)
+    logger.debug(f"Deleting DNS record with ID: {record_id}")
+    req = build_api_request(
+        config, method="DELETE", subpath=record_id, params=None, logger=logger
+    )
+    response = parse_api_response(req.logger)
     if response and response.get("success"):
-        logging.info(f"DNS record {record_id} deleted successfully.")
+        logger.info(f"DNS record {record_id} deleted successfully.")
         return True
     else:
-        logging.error(f"Failed to delete DNS record {record_id}.")
+        logger.error(f"Failed to delete DNS record {record_id}.")
         return False
 
 
@@ -371,6 +387,7 @@ def execute_dns_changes(
     record_ids_to_remove: list[str],
     add_record_func: Callable[[str], bool],
     delete_record_func: Callable[[str], bool],
+    logger: logging.Logger,
 ) -> None:
     """Execute DNS changes in parallel using ProcessPoolExecutor.
 
@@ -379,19 +396,20 @@ def execute_dns_changes(
         record_ids_to_remove (list[str]): List of DNS record IDs to remove.
         add_record_func (Callable[[str], bool]): Function to add a DNS record.
         delete_record_func (Callable[[str], bool]): Function to delete a DNS record.
+        logger (logging.Logger): Logger instance for logging messages.
     """
     if not (ips_to_add or record_ids_to_remove):
-        logging.info("No DNS changes needed.")
+        logger.info("No DNS changes needed.")
         return
-    logging.info("IP addresses have been changed, updating DNS records...")
-    logging.debug(f"IPs to add: {', '.join(ips_to_add)}")
-    logging.debug(f"Record IDs to remove: {', '.join(record_ids_to_remove)}")
+    logger.info("IP addresses have been changed, updating DNS records...")
+    logger.debug(f"IPs to add: {', '.join(ips_to_add)}")
+    logger.debug(f"Record IDs to remove: {', '.join(record_ids_to_remove)}")
     with ProcessPoolExecutor() as pool:
         if ips_to_add:  # pragma: no branch, already checked
             pool.map(add_record_func, ips_to_add)
         if record_ids_to_remove:  # pragma: no branch, already checked
             pool.map(delete_record_func, record_ids_to_remove)
-    logging.info("DNS records update completed.")
+    logger.info("DNS records update completed.")
 
 
 # --- Main function ---
@@ -399,33 +417,43 @@ def main() -> Literal[0, 1]:
     """Main function"""
     try:
         interface, action, is_debug, config_path = parse_args()
-        setup_logging(is_debug)
+        logger = logging.getLogger("ddns")
+        setup_logging(is_debug, logger)
         if not is_debug:
-            logging.info("Waiting for network to be stabilize... 2s")
-            sleep(1)  # wait for the network to be fully up
+            logger.info("Waiting for network to be stabilize... 2s")
+            sleep(3)  # wait for the network to be fully up
 
-        config = load_config(config_path)
-        target_ips = set(get_global_ip_addresses(interface))
+        config = load_config(logger, config_path)
+        target_ips = set(get_global_ip_addresses(interface, logger))
         if not target_ips:
-            logging.warning("No global IP addresses found, exiting.")
+            logger.warning("No global IP addresses found, exiting.")
             return 0
         else:
-            logging.info(f"Local global IP addresses: {', '.join(target_ips)}")
+            logger.info(f"Local global IP addresses: {', '.join(target_ips)}")
 
-        all_records = get_dns_records(config)
+        all_records = get_dns_records(config, logger)
+
+        logger.debug(f"Current DNS records: {all_records}")
+
+        if all_records is None:
+            logger.error("Could not retrieve DNS records, exiting.")
+            return 1
 
         ips_to_add, record_ids_to_remove = determine_dns_actions(
             all_records, target_ips
         )
 
-        add_records_with_config = partial(add_dns_record, config)
-        delete_records_with_config = partial(delete_dns_record, config)
+        add_records_with_config = partial(add_dns_record, config=config, logger=logger)
+        delete_records_with_config = partial(
+            delete_dns_record, config=config, logger=logger
+        )
 
         execute_dns_changes(
             ips_to_add,
             record_ids_to_remove,
             add_records_with_config,
             delete_records_with_config,
+            logger,
         )
 
         return 0
