@@ -186,8 +186,8 @@ def get_global_ip_addresses(interface: str | None) -> list[str]:
 def build_api_request(
     config: Config,
     method: Literal["GET", "POST", "DELETE"],
-    subpath: dict[str, str] | None,
-    params: str | None,
+    subpath: dict[str, str] | None = None,
+    params: str | None = None,
     data: dict[str, any] | None = None,
 ) -> request.Request:
     """Build an API request to Cloudflare.
