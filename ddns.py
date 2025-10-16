@@ -13,7 +13,7 @@ from shutil import which
 from subprocess import CalledProcessError, check_output
 from sys import exit, stdout
 from time import sleep
-from typing import Literal
+from typing import Callable, Literal, Sequence
 from urllib import error, parse, request
 
 
@@ -57,18 +57,29 @@ def setup_logging(is_debug: bool):
     Args:
         is_debug (bool): If True, set logging level to DEBUG, else INFO.
     """
+    logger = logging.getLogger("ddns")
+
     log_level = logging.DEBUG if is_debug else logging.INFO
     handler = logging.StreamHandler(stdout)
     handler.setFormatter(CustomFormatter())
-    logging.basicConfig(level=log_level, handlers=[handler])
+
+    logger.setLevel(log_level)
+    logger.addHandler(handler)
     logging.debug("Debug mode is enabled.")
 
 
-def parse_args() -> tuple[str, str, bool, str]:
-    """Parse command line arguments.
+def parse_args(args: Sequence[str] | None = None) -> tuple[str, str, bool, str]:
+    """Parse Command Line Args
+
+    Args:
+        args (Sequence[str] | None, optional): System args. Defaults to None.
 
     Returns:
-        Tuple[str, str, bool, str]: INTERFACE, ACTION, IS_DEBUG, CONFIG_PATH
+        tuple[str, str, bool, str]: A tuple containing:
+            - INTERFACE (str): Network interface that triggered the script.
+            - ACTION (str): NetworkManager action to trigger the script.
+            - is_debug (bool): True if DEBUG environment variable is set to "1".
+            - config_path (str): Path to the configuration file.
     """
     parser = ArgumentParser(
         prog="ddns.py",
@@ -86,7 +97,7 @@ def parse_args() -> tuple[str, str, bool, str]:
         type=str,
         help="NetworkManager action to trigger the script.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(args)
     is_debug = getenv("DEBUG") == "1"
     config_path = (
         "/etc/NetworkManager/dispatcher.d/ddns/config.json"
@@ -94,23 +105,6 @@ def parse_args() -> tuple[str, str, bool, str]:
         else "./ddns/config.json"  # use a local config file for debugging
     )
     return args.INTERFACE.strip(), args.ACTION.strip(), is_debug, config_path
-
-
-def calculate_dns_changes(
-    current_ips: set[str], desired_ips: set[str]
-) -> tuple[set[str], set[str]]:
-    """Calculate which IPs need to be added and which need to be removed.
-    Args:
-        current_ips (set[str]): The set of currently configured IPs.
-        desired_ips (set[str]): The set of desired IPs.
-    Returns:
-        Tuple[set[str], Set[str]]: A tuple containing two sets:
-            - The first set contains IPs to be added.
-            - The second set contains IPs to be removed.
-    """
-    ips_to_add = desired_ips - current_ips
-    ips_to_remove = current_ips - desired_ips
-    return ips_to_add, ips_to_remove
 
 
 def load_config(config_path: str = "config.json") -> Config:
@@ -155,7 +149,9 @@ def get_global_ip_addresses(interface: str | None) -> list[str]:
             "'ip' command not found. Please install iproute2 package."
         )
     args: list[str] = [ip_route_path, "-j", "addr", "show"]
-    if interface and interface != "none":
+    if (
+        interface and interface != "none"
+    ):  # Network Manager may pass "none" or "" as interface
         logging.info(f"Checking IP addresses for interface: {interface}")
         args.append(interface)
     else:
@@ -187,19 +183,24 @@ def get_global_ip_addresses(interface: str | None) -> list[str]:
     return global_ip_addresses
 
 
-def _send_api_request(
-    config: Config, url: str, method: str, data: dict[str, any] | None = None
-) -> dict[str, any] | None:
-    """Send an API request to Cloudflare.
+def build_api_request(
+    config: Config,
+    method: Literal["GET", "POST", "DELETE"],
+    subpath: dict[str, str] | None,
+    params: str | None,
+    data: dict[str, any] | None = None,
+) -> request.Request:
+    """Build an API request to Cloudflare.
 
     Args:
         config (Config): Configuration object containing authentication details.
-        url (str): The API endpoint URL.
-        method (str): HTTP method (e.g., "GET", "POST", "DELETE")
-        data (dict[str, any] | None, optional): The request payload. Defaults to None.
+        method (Literal["GET", "POST", "DELETE"]): HTTP method.
+        params (str | None): URL parameters to append to the endpoint, optional.
+        subpath (str | None): API endpoint subpath, optional.
+        data (dict[str, any] | None, optional): The request payload, optional.
 
     Returns:
-        dict[str, any] | None: The response data in JSON format, or None if an error occurred.
+        request.Request: a Request object if the request was successful, None otherwise
     """
     headers = {
         "X-Auth-Email": config.email,
@@ -220,9 +221,29 @@ def _send_api_request(
         request.install_opener(opener)
         logging.info(f"Using proxy for API requests: {config.api_request_proxy}")
 
+    endpoint = (
+        f"https://api.cloudflare.com/client/v4/zones/{config.zone_id}/dns_records"
+    )
+    url = f"{endpoint}/{subpath}" if subpath else endpoint
+    url = f"{url}?{parse.urlencode(params)}" if params else url
+
     req = request.Request(url, method=method, data=body, headers=headers)
+
+    return req
+
+
+# impure function to handle Network IO
+def parse_api_response(req: request.Request) -> dict[str, any] | None:
+    """Open and parse the API response.
+
+    Args:
+        req (request.Request): A request Object
+
+    Returns:
+        dict[str, any] | None: The reponse data in json format
+    """
     try:
-        with request.urlopen(req, timeout=10) as response:
+        with request.urlopen(req, timeout=5) as response:
             if response.status == 200:
                 return json.loads(response.read().decode("utf-8"))
             else:
@@ -233,31 +254,38 @@ def _send_api_request(
         return None
 
 
-def get_dns_records(
-    config: Config, domain_name: str, type: str
-) -> list[dict[str, int | bool | str]] | None:
-    """Get DNS records for a given type.
+def get_dns_records(config: Config) -> list[dict[str, int | bool | str]] | None:
+    """Get DNS records of type "A" and "AAAA".
 
     Args:
-        config (Config): Configuration object containing authentication details.
-        domain_name (str): The domain name to query.
-        type (str): "A" for IPv4 or "AAAA" for IPv6, must be within ["A", "AAAA"]
+        config (Config): Configuration object containing zone_id and domain_to_bind.
 
     Returns:
         list | None: a list of DNS records if found, None otherwise
     """
 
-    if type not in ["A", "AAAA"]:
-        logging.error("Invalid type, must be 'A' or 'AAAA'")
-        return None
+    params = parse.urlencode({"name": config.domain_to_bind})
 
-    endpoint = (
-        f"https://api.cloudflare.com/client/v4/zones/{config.zone_id}/dns_records"
+    req: dict[str, any] | None = build_api_request(
+        config,
+        "GET",
+        params=params,
     )
-    params = parse.urlencode({"name": domain_name, "type": type})
-    url = f"{endpoint}?{params}"
-    response: dict[str, any] | None = _send_api_request(config, url, "GET")
-    return response.get("result") if response else None
+
+    response = parse_api_response(req)
+
+    # fliter the records to only include A and AAAA types
+    if response and response.get("success"):
+        filtered_records = list(
+            filter(lambda r: r["type"] in ("A", "AAAA"), response.get("result", []))
+        )
+        logging.debug(
+            f"Fetched {len(filtered_records)} DNS records for {config.domain_to_bind}"
+        )
+        return filtered_records
+    else:
+        logging.error("Failed to fetch DNS records")
+        return None
 
 
 def add_dns_record(config: Config, content: str) -> bool:
@@ -272,19 +300,18 @@ def add_dns_record(config: Config, content: str) -> bool:
     """
     logging.debug(f"Adding DNS record: {config.domain_to_bind} -> {content}")
 
-    endpoint = (
-        f"https://api.cloudflare.com/client/v4/zones/{config.zone_id}/dns_records"
-    )
     data = {
-        "type": ip_address(content).version == 4 and "A" or "AAAA",
+        "type": "A" if ip_address(content).version == 4 else "AAAA",
         "name": config.domain_to_bind,
         "content": content,
         "ttl": 1,  # Setting to 1 means 'automatic'
         "proxied": False,
     }
 
-    response: dict[str, any] | None = _send_api_request(config, endpoint, "POST", data)
-    if response and response.get("success"):
+    req = build_api_request(config, method="POST", subpath=None, params=None, data=data)
+    resp = parse_api_response(req)
+
+    if resp and resp.get("success"):
         logging.info(
             f"DNS record added successfully: {config.domain_to_bind} -> {content}"
         )
@@ -305,17 +332,66 @@ def delete_dns_record(config: Config, record_id: str) -> bool:
         bool: True if the deletion was successful, False otherwise
     """
     logging.debug(f"Deleting DNS record with ID: {record_id}")
-    endpoint = (
-        f"https://api.cloudflare.com/client/v4/zones/{config.zone_id}/dns_records"
-    )
-    url = f"{endpoint}/{record_id}"
-    response: dict[str, any] | None = _send_api_request(config, url, "DELETE")
+    req = build_api_request(config, "DELETE", subpath=record_id, params=None)
+    response = parse_api_response(req)
     if response and response.get("success"):
         logging.info(f"DNS record {record_id} deleted successfully.")
         return True
     else:
         logging.error(f"Failed to delete DNS record {record_id}.")
         return False
+
+
+def determine_dns_actions(
+    all_dns_records: list[dict[str, any]], desired_ips: set[str]
+) -> tuple[set[str], set[str]]:
+    """Determine which DNS records need to be added or removed.
+
+    Args:
+        all_dns_records (list[dict[str, any]]): List of current DNS records.
+        desired_ips (set[str]): Set of desired IP addresses.
+
+    Returns:
+        tuple[set[str], set[str]]: A tuple containing two sets:
+            - ips_to_add (set[str]): IP addresses that need to be added as DNS records
+            - record_ids_to_remove (set[str]): DNS record ids that need to be removed from DNS records
+    """
+    current_ips: set[str] = {record["content"] for record in all_dns_records}
+
+    ips_to_add = desired_ips - current_ips
+    ips_to_remove = current_ips - desired_ips
+    record_ids_to_remove: set[str] = {
+        record["id"] for record in all_dns_records if record["content"] in ips_to_remove
+    }
+    return ips_to_add, record_ids_to_remove
+
+
+def execute_dns_changes(
+    ips_to_add: set[str],
+    record_ids_to_remove: list[str],
+    add_record_func: Callable[[str], bool],
+    delete_record_func: Callable[[str], bool],
+) -> None:
+    """Execute DNS changes in parallel using ProcessPoolExecutor.
+
+    Args:
+        ips_to_add (set[str]): Set of IP addresses to add as DNS records.
+        record_ids_to_remove (list[str]): List of DNS record IDs to remove.
+        add_record_func (Callable[[str], bool]): Function to add a DNS record.
+        delete_record_func (Callable[[str], bool]): Function to delete a DNS record.
+    """
+    if not (ips_to_add or record_ids_to_remove):
+        logging.info("No DNS changes needed.")
+        return
+    logging.info("IP addresses have been changed, updating DNS records...")
+    logging.debug(f"IPs to add: {', '.join(ips_to_add)}")
+    logging.debug(f"Record IDs to remove: {', '.join(record_ids_to_remove)}")
+    with ProcessPoolExecutor() as pool:
+        if ips_to_add:  # pragma: no branch, already checked
+            pool.map(add_record_func, ips_to_add)
+        if record_ids_to_remove:  # pragma: no branch, already checked
+            pool.map(delete_record_func, record_ids_to_remove)
+    logging.info("DNS records update completed.")
 
 
 # --- Main function ---
@@ -326,53 +402,32 @@ def main() -> Literal[0, 1]:
         setup_logging(is_debug)
         if not is_debug:
             logging.info("Waiting for network to be stabilize... 2s")
-            sleep(2)  # wait for the network to be fully up
-        # loading configuration (side effect)
+            sleep(1)  # wait for the network to be fully up
+
         config = load_config(config_path)
-        local_ips = set(get_global_ip_addresses(interface))
-        logging.info(f"Local global IP addresses: {', '.join(local_ips)}")
-        if not local_ips:
-            logging.error("No global IP addresses found, exiting.")
-            return 1
-        logging.info(f"Found Local IPs: {', '.join(local_ips)}")
-
-        # Fetch current DNS records
-        ipv4_records = get_dns_records(config, config.domain_to_bind, "A") or []
-        ipv6_records = get_dns_records(config, config.domain_to_bind, "AAAA") or []
-        all_records = ipv4_records + ipv6_records
-        current_ips = {record["content"] for record in all_records}
-
-        # Calculate changes
-        ips_to_add, ips_to_remove = calculate_dns_changes(current_ips, local_ips)
-
-        # apply changes in parallel
-        if not (ips_to_add or ips_to_remove):
-            logging.info("No changes needed, exiting.")
+        target_ips = set(get_global_ip_addresses(interface))
+        if not target_ips:
+            logging.warning("No global IP addresses found, exiting.")
             return 0
+        else:
+            logging.info(f"Local global IP addresses: {', '.join(target_ips)}")
 
-        logging.info("IP addresses have been changed, updating DNS records...")
-        logging.debug(
-            f"Current IPs: {', '.join(current_ips)}, Desired IPs: {', '.join(local_ips)}"
-        )
-        logging.debug(
-            f"IPs to add: {', '.join(ips_to_add)}, IPs to remove: {', '.join(ips_to_remove)}"
+        all_records = get_dns_records(config)
+
+        ips_to_add, record_ids_to_remove = determine_dns_actions(
+            all_records, target_ips
         )
 
         add_records_with_config = partial(add_dns_record, config)
         delete_records_with_config = partial(delete_dns_record, config)
 
-        with ProcessPoolExecutor() as pool:
-            if ips_to_add:
-                pool.map(add_records_with_config, ips_to_add)
-            if ips_to_remove:
-                record_ids_to_remove = [
-                    record["id"]
-                    for record in all_records
-                    if record["content"] in ips_to_remove
-                ]
-                pool.map(delete_records_with_config, record_ids_to_remove)
+        execute_dns_changes(
+            ips_to_add,
+            record_ids_to_remove,
+            add_records_with_config,
+            delete_records_with_config,
+        )
 
-        logging.info("DNS records update completed.")
         return 0
     except Exception as e:
         logging.critical(f"An unrecoverable error occurred: {e}.", exc_info=True)

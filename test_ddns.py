@@ -1,687 +1,662 @@
-# test_ddns.py
 import json
 import logging
 import unittest
 from subprocess import CalledProcessError
-from unittest.mock import MagicMock, mock_open, patch
-from urllib import error
+from unittest.mock import ANY, MagicMock, mock_open, patch
 
+# Import the functions and classes to be tested
 import ddns
 
-# Disable logging for tests to keep the output clean
+# Disable logging during tests to keep the output clean
 logging.disable(logging.CRITICAL)
 
 
-class TestDDNSScript(unittest.TestCase):
-    def setUp(self):
-        """Set up a sample config object for use in tests."""
-        self.sample_config = ddns.Config(
-            email="test@example.com",
-            api_key="fake_api_key",
-            zone_id="fake_zone_id",
-            domain_to_bind="test.example.com",
-            api_request_proxy=None,
+class TestArgParsing(unittest.TestCase):
+    """Tests for the parse_args function."""
+
+    @patch("ddns.getenv")
+    def test_parse_args_normal(self, mock_getenv):
+        """Test argument parsing in a standard (non-debug) environment."""
+        mock_getenv.return_value = None  # Not in debug mode
+        args = ["eth0", "up"]
+        interface, action, is_debug, config_path = ddns.parse_args(args)
+        self.assertEqual(interface, "eth0")
+        self.assertEqual(action, "up")
+        self.assertFalse(is_debug)
+        self.assertEqual(
+            config_path, "/etc/NetworkManager/dispatcher.d/ddns/config.json"
         )
 
-    def test_calculate_dns_changes(self):
-        """Test the logic for calculating DNS changes."""
-        # Scenario 1: No changes needed
-        current = {"1.1.1.1", "2606:4700:4700::1111"}
-        desired = {"1.1.1.1", "2606:4700:4700::1111"}
-        add, remove = ddns.calculate_dns_changes(current, desired)
-        self.assertEqual(add, set())
-        self.assertEqual(remove, set())
+    @patch("ddns.getenv")
+    def test_parse_args_debug(self, mock_getenv):
+        """Test argument parsing when DEBUG environment variable is set."""
+        mock_getenv.return_value = "1"  # Debug mode enabled
+        args = ["wlan0", "connectivity-change"]
+        interface, action, is_debug, config_path = ddns.parse_args(args)
+        self.assertEqual(interface, "wlan0")
+        self.assertEqual(action, "connectivity-change")
+        self.assertTrue(is_debug)
+        self.assertEqual(config_path, "./ddns/config.json")
 
-        # Scenario 2: Only additions needed
-        current = {"1.1.1.1"}
-        desired = {"1.1.1.1", "2.2.2.2"}
-        add, remove = ddns.calculate_dns_changes(current, desired)
-        self.assertEqual(add, {"2.2.2.2"})
-        self.assertEqual(remove, set())
 
-        # Scenario 3: Only removals needed
-        current = {"1.1.1.1", "2.2.2.2"}
-        desired = {"1.1.1.1"}
-        add, remove = ddns.calculate_dns_changes(current, desired)
-        self.assertEqual(add, set())
-        self.assertEqual(remove, {"2.2.2.2"})
+class TestLoggingSetup(unittest.TestCase):
+    """Tests for the CustomFormatter and setup_logging function."""
 
-        # Scenario 4: Both additions and removals needed
-        current = {"1.1.1.1", "3.3.3.3"}
-        desired = {"1.1.1.1", "2.2.2.2"}
-        add, remove = ddns.calculate_dns_changes(current, desired)
-        self.assertEqual(add, {"2.2.2.2"})
-        self.assertEqual(remove, {"3.3.3.3"})
+    def setUp(self):
+        """Save the original logging state before each test."""
+        self.logger = logging.getLogger("ddns")
+        self.original_level = self.logger.level
+        # Make a copy of the list, not a reference
+        self.original_handlers = self.logger.handlers[:].copy()
 
-        # Scenario 5: Empty current IPs
-        current = set()
-        desired = {"1.1.1.1", "2.2.2.2"}
-        add, remove = ddns.calculate_dns_changes(current, desired)
-        self.assertEqual(add, {"1.1.1.1", "2.2.2.2"})
-        self.assertEqual(remove, set())
+    def tearDown(self):
+        """Restore the original logging state after each test."""
+        self.logger.setLevel(self.original_level)
+        self.logger.handlers = self.original_handlers
 
-    @patch(
-        "builtins.open",
-        new_callable=mock_open,
-        read_data=json.dumps(
+    def test_custom_formatter_applies_correct_colors(self):
+        """Verify that the formatter applies the correct color for each log level."""
+        formatter = ddns.CustomFormatter()
+
+        # A sample record that we will modify for each level
+        record = logging.LogRecord(
+            name="test_logger",
+            level=logging.DEBUG,  # will be changed in the loop
+            pathname="/path/to/test.py",
+            lineno=123,
+            msg="A test message",
+            args=(),
+            exc_info=None,
+        )
+
+        test_cases = {
+            logging.DEBUG: ddns.CustomFormatter.grey,
+            logging.INFO: ddns.CustomFormatter.grey,
+            logging.WARNING: ddns.CustomFormatter.yellow,
+            logging.ERROR: ddns.CustomFormatter.red,
+            logging.CRITICAL: ddns.CustomFormatter.bold_red,
+        }
+
+        for level, expected_color in test_cases.items():
+            with self.subTest(level=logging.getLevelName(level)):
+                record.levelno = level
+                record.levelname = logging.getLevelName(level)
+
+                formatted_string = formatter.format(record)
+
+                # Check that the string starts with the color and ends with the reset code
+                self.assertTrue(formatted_string.startswith(expected_color))
+                self.assertTrue(formatted_string.endswith(ddns.CustomFormatter.reset))
+                self.assertIn("A test message", formatted_string)
+                self.assertIn("(test.py:123)", formatted_string)
+
+    def test_setup_logging_in_debug_mode(self):
+        """Test setup_logging with is_debug=True."""
+        ddns.setup_logging(is_debug=True)
+
+        root_logger = logging.getLogger("ddns")
+
+        # Check that the level is set to DEBUG
+        self.assertEqual(root_logger.level, logging.DEBUG)
+
+        # Check that a handler was added and it's the correct type with the correct formatter
+        self.assertEqual(len(root_logger.handlers), len(self.original_handlers) + 1)
+        handler = root_logger.handlers[-1]
+        self.assertIsInstance(handler, logging.StreamHandler)
+        self.assertIsInstance(handler.formatter, ddns.CustomFormatter)
+
+    def test_setup_logging_in_info_mode(self):
+        """Test setup_logging with is_debug=False."""
+        ddns.setup_logging(is_debug=False)
+
+        root_logger = logging.getLogger("ddns")
+
+        # Check that the level is set to INFO
+        self.assertEqual(root_logger.level, logging.INFO)
+
+        # Check handler and formatter configuration
+        self.assertEqual(len(root_logger.handlers), len(self.original_handlers) + 1)
+        handler = root_logger.handlers[-1]
+        self.assertIsInstance(handler, logging.StreamHandler)
+        self.assertIsInstance(handler.formatter, ddns.CustomFormatter)
+
+
+class TestConfigLoading(unittest.TestCase):
+    """Tests for the load_config function."""
+
+    def test_load_config_success(self):
+        """Test successful loading of a valid config file."""
+        mock_config_data = json.dumps(
             {
                 "email": "test@example.com",
-                "api_key": "fake_api_key",
-                "zone_id": "fake_zone_id",
-                "domain_to_bind": "test.example.com",
+                "api_key": "dummy_api_key",
+                "zone_id": "dummy_zone_id",
+                "domain_to_bind": "ddns.example.com",
+                "proxy": "http://proxy.example.com:8080",
             }
-        ),
-    )
-    def test_load_config_success(self, mock_file):
-        """Test successful loading of configuration."""
-        config = ddns.load_config("dummy_path.json")
-        self.assertEqual(config.email, "test@example.com")
-        self.assertEqual(config.api_key, "fake_api_key")
-        self.assertIsNone(config.api_request_proxy)
-        mock_file.assert_called_with("dummy_path.json", "r")
+        )
+        m = mock_open(read_data=mock_config_data)
+        with patch("builtins.open", m):
+            config = ddns.load_config("dummy_path.json")
+            self.assertEqual(config.email, "test@example.com")
+            self.assertEqual(config.api_key, "dummy_api_key")
+            self.assertEqual(config.zone_id, "dummy_zone_id")
+            self.assertEqual(config.domain_to_bind, "ddns.example.com")
+            self.assertEqual(config.api_request_proxy, "http://proxy.example.com:8080")
 
-    @patch("ddns.logging.basicConfig")
-    @patch("ddns.logging.debug")
-    def test_setup_logging_debug(self, mock_debug, mock_basic_config):
-        """Test setup_logging with debug mode enabled."""
-        ddns.setup_logging(True)
-        mock_basic_config.assert_called_once()
-        args, kwargs = mock_basic_config.call_args
-        self.assertEqual(kwargs["level"], logging.DEBUG)
-        self.assertIsInstance(kwargs["handlers"][0], logging.StreamHandler)
-        self.assertIsInstance(kwargs["handlers"][0].formatter, ddns.CustomFormatter)
-        mock_debug.assert_called_with("Debug mode is enabled.")
+    def test_load_config_file_not_found(self):
+        """Test handling of a missing configuration file."""
+        m = mock_open()
+        m.side_effect = FileNotFoundError
+        with patch("builtins.open", m):
+            with self.assertRaises(FileNotFoundError):
+                ddns.load_config("non_existent_path.json")
 
-    @patch("ddns.logging.basicConfig")
-    @patch("ddns.logging.debug")
-    def test_setup_logging_info(self, mock_debug, mock_basic_config):
-        """Test setup_logging with debug mode disabled."""
-        ddns.setup_logging(False)
-        mock_basic_config.assert_called_once()
-        args, kwargs = mock_basic_config.call_args
-        self.assertEqual(kwargs["level"], logging.INFO)
-        self.assertIsInstance(kwargs["handlers"][0], logging.StreamHandler)
-        self.assertIsInstance(kwargs["handlers"][0].formatter, ddns.CustomFormatter)
-        mock_debug.assert_called_with("Debug mode is enabled.")
+    def test_load_config_json_decode_error(self):
+        """Test handling of a malformed JSON configuration file."""
+        invalid_json = (
+            '{"email": "test@example.com", "api_key": "key"'  # Missing closing brace
+        )
+        m = mock_open(read_data=invalid_json)
+        with patch("builtins.open", m):
+            with self.assertRaises(json.JSONDecodeError):
+                ddns.load_config("malformed.json")
 
-    @patch("builtins.open", new_callable=mock_open)
-    def test_load_config_file_not_found(self, mock_file):
-        """Test config loading when file is not found."""
-        mock_file.side_effect = FileNotFoundError
-        with self.assertRaises(FileNotFoundError):
-            ddns.load_config("non_existent.json")
 
-    @patch("builtins.open", new_callable=mock_open, read_data="this is not json")
-    def test_load_config_json_error(self, mock_file):
-        """Test config loading with invalid JSON."""
-        with self.assertRaises(json.JSONDecodeError):
-            ddns.load_config("invalid.json")
+class TestIPAddressFetching(unittest.TestCase):
+    """Tests for get_global_ip_addresses function."""
 
-    @patch("ddns.which", return_value="/usr/bin/ip")
     @patch("ddns.check_output")
-    def test_get_global_ip_addresses_on_iface_success(
-        self, mock_check_output, mock_which
-    ):
-        """Test successful retrieval of global IP addresses on a specific interface."""
-        # Mock output from `ip -j addr show eth0`
-        mock_json_output = [
-            {
-                "ifname": "eth0",
-                "addr_info": [
-                    {"local": "192.168.1.100"},  # Private IPv4
-                    {"local": "1.2.3.4"},  # Public IPv4
-                    {"local": "2001:1::1"},  # Public IPv6
-                    {"local": "fe80::1"},  # Link-local IPv6 (private)
-                    {"local": "2001:db8::dead", "deprecated": True},  # Deprecated IPv6
-                ],
-            },
-        ]
-        mock_check_output.return_value = json.dumps(mock_json_output).encode()
+    @patch("ddns.which")
+    def test_get_global_ip_addresses_with_iface(self, mock_which, mock_check_output):
+        """Test successful fetching and filtering of IP addresses."""
+        mock_which.return_value = "/usr/bin/ip"
+        mock_ip_output = json.dumps(
+            [
+                {
+                    "ifname": "eth0",
+                    "addr_info": [
+                        {
+                            "local": "192.168.1.100",
+                            "scope": "global",
+                        },  # Private, should be filtered by is_global
+                        {
+                            "local": "fe80::1",
+                            "scope": "link",
+                        },  # Link-local IPv6, should be filtered
+                        {"local": "2001:4:112::", "scope": "global"},  # Public IPv6
+                        {
+                            "local": "2001:db8::dead:beef",
+                            "scope": "global",
+                            "deprecated": True,
+                        },  # Deprecated, should be filtered
+                    ],
+                }
+            ]
+        ).encode("utf-8")
+        mock_check_output.return_value = mock_ip_output
 
         ips = ddns.get_global_ip_addresses("eth0")
-        mock_which.assert_called_with("ip")
+        self.assertCountEqual(ips, ["2001:4:112::"])
         mock_check_output.assert_called_with(
             ["/usr/bin/ip", "-j", "addr", "show", "eth0"]
         )
 
-        self.assertEqual(set(ips), {"1.2.3.4", "2001:1::1"})
-
-    @patch("ddns.which", return_value="/usr/bin/ip")
     @patch("ddns.check_output")
-    @patch("ddns.logging.warning")
-    def test_get_global_ip_addresses_no_ipv6_warning(
-        self, mock_logging_warning, mock_check_output, mock_which
-    ):
-        """Test warning when no global IPv6 is found."""
-        mock_json_output = [
-            {
-                "ifname": "eth0",
-                "addr_info": [{"local": "1.2.3.4"}],  # Only IPv4
-            }
-        ]
-        mock_check_output.return_value = json.dumps(mock_json_output).encode()
-        ddns.get_global_ip_addresses("eth0")
-        mock_logging_warning.assert_called_with("No global IPv6 address found.")
-
-    @patch("ddns.which", return_value="/usr/bin/ip")
-    @patch("ddns.check_output")
-    @patch("ddns.logging.warning")
-    def test_get_global_ip_addresses_no_ipv4_warning(
-        self, mock_warning, mock_check_output, mock_which
-    ):
-        """Test warning when no global IPv4 is found."""
-        mock_json_output = [
-            {
-                "ifname": "eth0",
-                "addr_info": [{"local": "2001:1::1"}],  # Only IPv6
-            }
-        ]
-        mock_check_output.return_value = json.dumps(mock_json_output).encode()
-        ddns.get_global_ip_addresses("eth0")
-        mock_warning.assert_called_with("No global IPv4 address found.")
-
-    @patch("ddns.which", return_value="/usr/bin/ip")
-    @patch("ddns.check_output")
-    def test_get_global_ip_addresses_deprecated_filtered(
-        self, mock_check_output, mock_which
-    ):
-        """Test deprecated IPs are filtered out."""
-        mock_json_output = [
-            {
-                "ifname": "eth0",
-                "addr_info": [
-                    {"local": "1.2.3.4"},
-                    {"local": "2001:db8::1", "deprecated": True},
-                ],
-            }
-        ]
-        mock_check_output.return_value = json.dumps(mock_json_output).encode()
-        ips = ddns.get_global_ip_addresses("eth0")
-        self.assertEqual(ips, ["1.2.3.4"])
-
-    @patch("ddns.which", return_value="/usr/bin/ip")
-    @patch("ddns.check_output")
-    def test_get_global_ip_addresses_with_no_iface_success(
-        self, mock_check_output, mock_which
-    ):
-        """Test successful retrieval of global IP addresses."""
-        # Mock output from `ip -j addr show`
-        mock_json_output = [
-            {"ifname": "lo", "addr_info": [{"local": "127.0.0.1"}]},
-            {
-                "ifname": "eth0",
-                "addr_info": [
-                    {"local": "192.168.1.100"},  # Private IPv4
-                    {"local": "1.2.3.4"},  # Public IPv4
-                    {"local": "2001:1::1"},  # Public IPv6
-                    {"local": "fe80::1"},  # Link-local IPv6 (private)
-                    {"local": "2001:db8::dead", "deprecated": True},  # Deprecated IPv6
-                ],
-            },
-        ]
-        mock_check_output.return_value = json.dumps(mock_json_output).encode()
-
-        ips = ddns.get_global_ip_addresses("")
-        mock_which.assert_called_with("ip")
+    @patch("ddns.which")
+    def test_get_global_ip_addresses_no_iface(self, mock_which, mock_check_output):
+        """Test fetching IP addresses without specifying an interface."""
+        mock_which.return_value = "/usr/bin/ip"
+        mock_ip_output = json.dumps(
+            [
+                {
+                    "ifname": "eth0",
+                    "addr_info": [
+                        {
+                            "local": "192.168.1.100",
+                            "scope": "global",
+                        },  # Private, should be filtered by is_global
+                        {"local": "192.31.196.1", "scope": "global"},  # Public IPv4
+                        {
+                            "local": "fe80::1",
+                            "scope": "link",
+                        },  # Link-local IPv6, should be filtered\
+                        {
+                            "local": "2001:db8::dead:beef",
+                            "scope": "global",
+                            "deprecated": True,
+                        },  # Deprecated, should be filtered
+                    ],
+                },
+                {
+                    "ifname": "wlan0",
+                    "addr_info": [
+                        {"local": "192.168.10.100", "scope": "global"},  # Private
+                        {"local": "192.31.196.10", "scope": "global"},  # Public IPv4
+                        {
+                            "local": "fe80::2",
+                            "scope": "link",
+                        },  # Link-local IPv6, should be filtered
+                    ],
+                },
+                {
+                    "ifname": "lo",
+                    "addr_info": [
+                        {
+                            "local": "127.0.0.1",
+                            "scope": "host",
+                        },  # Loopback, should be filtered
+                        {"local": "::1", "scope": "host"},  # Loopback, should
+                    ],
+                },
+            ]
+        )
+        mock_check_output.return_value = mock_ip_output
+        ips = ddns.get_global_ip_addresses(None)
+        self.assertCountEqual(ips, ["192.31.196.10", "192.31.196.1"])
         mock_check_output.assert_called_with(["/usr/bin/ip", "-j", "addr", "show"])
 
-        self.assertEqual(set(ips), {"1.2.3.4", "2001:1::1"})
-
-    @patch("ddns.which", return_value=None)
-    def test_get_global_ip_addresses_ip_command_not_found(self, mock_which):
-        """Test when the 'ip' command is not available."""
+    @patch("ddns.which")
+    def test_ip_command_not_found(self, mock_which):
+        """Test behavior when the 'ip' command is not available."""
+        mock_which.return_value = None
         with self.assertRaises(FileNotFoundError):
             ddns.get_global_ip_addresses("eth0")
 
-    @patch("ddns.which", return_value="/usr/bin/ip")
-    @patch("ddns.check_output", side_effect=CalledProcessError(1, "ip", "error"))
-    def test_get_global_ip_addresses_command_failure(
-        self, mock_check_output, mock_which
-    ):
-        """Test RuntimeError when 'ip' command fails."""
+    @patch("ddns.check_output")
+    @patch("ddns.which")
+    def test_ip_command_fails(self, mock_which, mock_check_output):
+        """Test behavior when the 'ip' command fails to execute."""
+        mock_which.return_value = "/usr/bin/ip"
+        mock_check_output.side_effect = CalledProcessError(1, "ip")
         with self.assertRaises(RuntimeError):
             ddns.get_global_ip_addresses("eth0")
 
-    @patch("ddns.request.build_opener")
-    @patch("ddns.request.install_opener")
-    @patch("ddns.request.urlopen")
-    @patch("ddns.logging.info")
-    def test_send_api_request_with_proxy(
-        self, mock_info, mock_urlopen, mock_install, mock_build
-    ):
-        """Test _send_api_request with proxy setup."""
-        config = self.sample_config
-        config = ddns.Config(
+
+class TestApiInteraction(unittest.TestCase):
+    """Tests for API request building and response parsing."""
+
+    def setUp(self):
+        self.config = ddns.Config(
             email="test@example.com",
-            api_key="fake_api_key",
-            zone_id="fake_zone_id",
-            domain_to_bind="test.example.com",
-            api_request_proxy="http://proxy.example.com",
+            api_key="dummy_api_key",
+            zone_id="dummy_zone_id",
+            domain_to_bind="ddns.example.com",
+            api_request_proxy=None,
         )
-        mock_response = MagicMock()
-        mock_response.status = 200
-        mock_response.read.return_value = b'{"success": true}'
-        mock_urlopen.return_value.__enter__.return_value = mock_response
 
-        result = ddns._send_api_request(config, "http://test.com", "GET")
-        mock_build.assert_called_once()
-        mock_install.assert_called_once()
-        mock_info.assert_called_with(
-            "Using proxy for API requests: http://proxy.example.com"
+    def test_build_api_request_get(self):
+        """Test building a GET request with proxy."""
+        config_with_proxy = self.config
+        config_with_proxy.api_request_proxy = "http://proxy.example.com:8080"
+        req = ddns.build_api_request(
+            config_with_proxy,
+            "GET",
+            subpath="12345",
+            params={"name": "ddns.example.com"},
+            data=None,
         )
-        self.assertEqual(result, {"success": True})
-
-    @patch(
-        "ddns.request.urlopen",
-        side_effect=error.HTTPError(None, 404, "Not Found", None, None),
-    )
-    @patch("ddns.logging.error")
-    def test_send_api_request_http_error(self, mock_error, mock_urlopen):
-        """Test _send_api_request with HTTPError."""
-        result = ddns._send_api_request(self.sample_config, "http://test.com", "GET")
-        mock_error.assert_called_with("API request error: HTTP Error 404: Not Found")
-        self.assertIsNone(result)
-
-    @patch("ddns.request.urlopen", side_effect=error.URLError("Connection failed"))
-    @patch("ddns.logging.error")
-    def test_send_api_request_url_error(self, mock_error, mock_urlopen):
-        """Test _send_api_request with URLError."""
-        result = ddns._send_api_request(self.sample_config, "http://test.com", "GET")
-        mock_error.assert_called_with(
-            "API request error: <urlopen error Connection failed>"
+        self.assertEqual(req.method, "GET")
+        self.assertTrue(
+            req.full_url.startswith(
+                "https://api.cloudflare.com/client/v4/zones/dummy_zone_id/dns_records/12345?"
+            )
         )
-        self.assertIsNone(result)
+        self.assertEqual(req.get_header("X-auth-email"), "test@example.com")
+        self.assertEqual(req.get_header("Authorization"), "Bearer dummy_api_key")
 
-    @patch("ddns.request.urlopen")
-    @patch("ddns.logging.error")
-    def test_send_api_request_json_decode_error(self, mock_error, mock_urlopen):
-        """Test _send_api_request with JSONDecodeError."""
-        mock_response = MagicMock()
-        mock_response.status = 200
-        mock_response.read.return_value = b"invalid json"
-        mock_urlopen.return_value.__enter__.return_value = mock_response
-
-        result = ddns._send_api_request(self.sample_config, "http://test.com", "GET")
-        mock_error.assert_called()
-        self.assertIsNone(result)
-
-    @patch("ddns.request.urlopen")
-    @patch("ddns.logging.error")
-    def test_send_api_request_non_200_status(self, mock_error, mock_urlopen):
-        """Test _send_api_request with non-200 status."""
-        mock_response = MagicMock()
-        mock_response.status = 500
-        mock_response.reason = "Internal Server Error"
-        mock_urlopen.return_value.__enter__.return_value = mock_response
-
-        result = ddns._send_api_request(self.sample_config, "http://test.com", "GET")
-        mock_error.assert_called_with("Error 500: Internal Server Error")
-        self.assertIsNone(result)
-
-    def test_custom_formatter_format(self):
-        """Test CustomFormatter.format applies the correct format based on log level."""
-        formatter = ddns.CustomFormatter()
-
-        # Test INFO level (grey format)
-        record = logging.LogRecord(
-            name="test",
-            level=logging.INFO,
-            pathname="",
-            lineno=0,
-            msg="test message",
-            args=(),
-            exc_info=None,
+    def test_build_api_request_post(self):
+        """Test building a POST request with data."""
+        data = {"type": "A", "name": "test"}
+        req = ddns.build_api_request(
+            self.config, "POST", subpath=None, params=None, data=data
         )
-        result = formatter.format(record)
-        self.assertIn("test message", result)
-        self.assertIn(formatter.grey, result)  # Check for color code
-        self.assertIn(formatter.reset, result)
-
-        # Test ERROR level (red format)
-        record.level = logging.ERROR
-        record.levelno = logging.ERROR
-        result = formatter.format(record)
-        self.assertIn(formatter.red, result)
+        self.assertEqual(req.method, "POST")
+        self.assertEqual(req.data, json.dumps(data).encode("utf-8"))
+        self.assertEqual(req.get_header("Content-type"), "application/json")
 
     @patch("ddns.request")
-    def test_send_api_request_failure(self, mock_request):
-        """Test a failed API request (non-200 status)."""
+    def test_parse_api_response_success(self, mock_request):
+        """Test parsing a successful API response."""
         mock_response = MagicMock()
-        mock_response.status = 400
-        mock_response.reason = "Bad Request"
+        mock_response.status = 200
+        mock_response.read.return_value = b'{"success": true, "result": [1, 2]}'
         mock_request.urlopen.return_value.__enter__.return_value = mock_response
 
-        response = ddns._send_api_request(
-            self.sample_config, "http://fake.api/endpoint", "POST", data={}
-        )
+        response = ddns.parse_api_response(MagicMock())
+        self.assertEqual(response, {"success": True, "result": [1, 2]})
 
+    @patch("ddns.request")
+    def test_parse_api_response_http_error(self, mock_request):
+        """Test handling of a non-200 HTTP status."""
+        mock_response = MagicMock()
+        mock_response.status = 403
+        mock_response.reason = "Forbidden"
+        mock_request.urlopen.return_value.__enter__.return_value = mock_response
+
+        response = ddns.parse_api_response(MagicMock())
         self.assertIsNone(response)
 
-    @patch("ddns._send_api_request")
-    def test_get_dns_records(self, mock_api_request):
-        """Test getting DNS records."""
-        mock_api_request.return_value = {
+    @patch("ddns.request")
+    def test_parse_api_json_error(self, mock_request):
+        """Test handling of a JSON decoding error."""
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.read.return_value = (
+            b'{"success": true, "result": [1, 2]'  # Malformed JSON
+        )
+        mock_request.urlopen.return_value.__enter__.return_value = mock_response
+
+        response = ddns.parse_api_response(MagicMock())
+        self.assertIsNone(response)
+
+
+class TestDNSRecordOperations(unittest.TestCase):
+    """Tests for get_dns_records, add_dns_record, delete_dns_record functions."""
+
+    def setUp(self):
+        """Set up a common config object for all tests in this class."""
+        self.config = ddns.Config(
+            email="test@example.com",
+            api_key="dummy_api_key",
+            zone_id="dummy_zone_id",
+            domain_to_bind="ddns.example.com",
+            api_request_proxy=None,
+        )
+
+    @patch("ddns.parse_api_response")
+    @patch("ddns.build_api_request")
+    def test_get_dns_records_success_and_filter(self, mock_build_req, mock_parse_resp):
+        """Test successful fetching of DNS records and ensure it filters for A/AAAA types."""
+        # Mock the API response to include various record types
+        mock_api_response = {
             "success": True,
-            "result": [{"id": "rec1", "type": "A", "content": "1.1.1.1"}],
+            "result": [
+                {
+                    "id": "id1",
+                    "type": "A",
+                    "name": "ddns.example.com",
+                    "content": "1.1.1.1",
+                },
+                {
+                    "id": "id2",
+                    "type": "AAAA",
+                    "name": "ddns.example.com",
+                    "content": "2001:db8::1",
+                },
+                {
+                    "id": "id3",
+                    "type": "CNAME",
+                    "name": "ddns.example.com",
+                    "content": "example.com",
+                },
+            ],
         }
+        mock_parse_resp.return_value = mock_api_response
 
-        records = ddns.get_dns_records(self.sample_config, "test.example.com", "A")
+        # Call the function under test
+        records = ddns.get_dns_records(self.config)
 
-        expected_url = f"https://api.cloudflare.com/client/v4/zones/{self.sample_config.zone_id}/dns_records?name=test.example.com&type=A"
-        mock_api_request.assert_called_with(self.sample_config, expected_url, "GET")
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["content"], "1.1.1.1")
+        # Assertions
+        mock_build_req.assert_called_once_with(
+            self.config, "GET", params="name=ddns.example.com"
+        )
+        mock_parse_resp.assert_called_once()
+        self.assertIsNotNone(records)
+        self.assertEqual(len(records), 2)  # Should have filtered out the CNAME record
+        record_types = {r["type"] for r in records}
+        self.assertIn("A", record_types)
+        self.assertIn("AAAA", record_types)
+        self.assertNotIn("CNAME", record_types)
 
-    @patch("ddns._send_api_request")
-    @patch("ddns.logging.error")
-    def test_get_dns_records_invalid_type(self, mock_error, mock_api_request):
-        """Test get_dns_records rejects invalid types."""
-        result = ddns.get_dns_records(self.sample_config, "test.com", "INVALID")
-        mock_error.assert_called_with("Invalid type, must be 'A' or 'AAAA'")
-        mock_api_request.assert_not_called()
-        self.assertIsNone(result)
+    @patch(
+        "ddns.parse_api_response",
+        return_value={"success": False, "errors": ["Auth error"]},
+    )
+    @patch("ddns.build_api_request")
+    def test_get_dns_records_api_failure(self, mock_build_req, mock_parse_resp):
+        """Test that get_dns_records returns None when the API call is not successful."""
+        records = ddns.get_dns_records(self.config)
+        self.assertIsNone(records)
+        mock_build_req.assert_called_once()
+        mock_parse_resp.assert_called_once()
 
-    @patch("ddns._send_api_request")
-    def test_add_dns_record(self, mock_api_request):
-        """Test adding a DNS record."""
-        mock_api_request.return_value = {"success": True}
-
-        # Test adding IPv4
-        result_v4 = ddns.add_dns_record(self.sample_config, "4.3.2.1")
-        self.assertTrue(result_v4)
-
-        # Check that the correct data was sent for IPv4
-        call_args_v4 = mock_api_request.call_args[0]
-        self.assertEqual(call_args_v4[3]["type"], "A")
-        self.assertEqual(call_args_v4[3]["content"], "4.3.2.1")
-
-        # Test adding IPv6
-        result_v6 = ddns.add_dns_record(self.sample_config, "2001:db8::2")
-        self.assertTrue(result_v6)
-
-        # Check that the correct data was sent for IPv6
-        call_args_v6 = mock_api_request.call_args[0]
-        self.assertEqual(call_args_v6[3]["type"], "AAAA")
-        self.assertEqual(call_args_v6[3]["content"], "2001:db8::2")
-
-    @patch("ddns._send_api_request", return_value={"success": False})
-    @patch("ddns.logging.error")
-    def test_add_dns_record_failure(self, mock_error, mock_api_request):
-        """Test add_dns_record when API returns failure."""
-        result = ddns.add_dns_record(self.sample_config, "1.2.3.4")
-        mock_error.assert_called_with("Failed to add DNS record")
-        self.assertFalse(result)
-
-    @patch("ddns._send_api_request")
-    def test_delete_dns_record(self, mock_api_request):
-        """Test deleting a DNS record."""
-        mock_api_request.return_value = {"success": True}
-        record_id = "fake_record_id"
-
-        result = ddns.delete_dns_record(self.sample_config, record_id)
+    @patch("ddns.parse_api_response", return_value={"success": True})
+    @patch("ddns.build_api_request")
+    def test_add_dns_record_ipv4_success(self, mock_build_req, mock_parse_resp):
+        """Test adding an IPv4 (A) record successfully."""
+        ip_to_add = "192.0.2.1"
+        result = ddns.add_dns_record(self.config, ip_to_add)
 
         self.assertTrue(result)
-        expected_url = f"https://api.cloudflare.com/client/v4/zones/{self.sample_config.zone_id}/dns_records/{record_id}"
-        mock_api_request.assert_called_with(self.sample_config, expected_url, "DELETE")
+        mock_build_req.assert_called_once()
+        # Check the arguments passed to build_api_request
+        args, kwargs = mock_build_req.call_args
+        self.assertEqual(kwargs["method"], second="POST")
+        self.assertEqual(kwargs["data"]["type"], "A")
+        self.assertEqual(kwargs["data"]["name"], self.config.domain_to_bind)
+        self.assertEqual(kwargs["data"]["content"], ip_to_add)
 
-    @patch("ddns._send_api_request", return_value={"success": False})
-    @patch("ddns.logging.error")
-    def test_delete_dns_record_failure(self, mock_error, mock_api_request):
-        """Test delete_dns_record when API returns failure."""
-        result = ddns.delete_dns_record(self.sample_config, "record_id_123")
-        mock_error.assert_called_with("Failed to delete DNS record record_id_123.")
+    @patch("ddns.parse_api_response", return_value={"success": True})
+    @patch("ddns.build_api_request")
+    def test_add_dns_record_ipv6_success(self, mock_build_req, mock_parse_resp):
+        """Test adding an IPv6 (AAAA) record successfully."""
+        ip_to_add = "2001:db8:abcd:0012::1"
+        result = ddns.add_dns_record(self.config, ip_to_add)
+
+        self.assertTrue(result)
+        mock_build_req.assert_called_once()
+        args, kwargs = mock_build_req.call_args
+        self.assertEqual(kwargs["data"]["type"], "AAAA")
+        self.assertEqual(kwargs["data"]["content"], ip_to_add)
+
+    @patch("ddns.parse_api_response", return_value={"success": False})
+    @patch("ddns.build_api_request")
+    def test_add_dns_record_failure(self, mock_build_req, mock_parse_resp):
+        """Test the failure case for adding a DNS record."""
+        result = ddns.add_dns_record(self.config, "1.2.3.4")
         self.assertFalse(result)
 
-    @patch("sys.argv", ["ddns.py", "eth0", "up"])
-    @patch("ddns.getenv", return_value="1")  # is_debug = True
-    def test_parse_args(self, mock_getenv):
-        """Test argument parsing."""
-        interface, action, is_debug, config_path = ddns.parse_args()
-        self.assertEqual(interface, "eth0")
-        self.assertEqual(action, "up")
-        self.assertTrue(is_debug)
-        self.assertEqual(config_path, "./ddns/config.json")
+    @patch(
+        "ddns.parse_api_response",
+        return_value={"success": True, "result": {"id": "record_to_delete"}},
+    )
+    @patch("ddns.build_api_request")
+    def test_delete_dns_record_success(self, mock_build_req, mock_parse_resp):
+        """Test deleting a DNS record successfully."""
+        record_id = "record_to_delete"
+        result = ddns.delete_dns_record(self.config, record_id)
 
-    def test_parse_help_args(self):
-        """Test argument parsing with help flag."""
-        with (
-            patch("sys.argv", ["ddns.py", "--help"]),
-            self.assertRaises(SystemExit) as cm,
-        ):
-            ddns.parse_args()
-        self.assertEqual(cm.exception.code, 0)
-
-    @patch("ddns.parse_args", return_value=("eth0", "up", False, "config.json"))
-    @patch("ddns.setup_logging")
-    @patch("ddns.load_config")
-    @patch("ddns.get_global_ip_addresses", return_value=["1.1.1.1"])
-    @patch("ddns.get_dns_records", side_effect=[[{"content": "1.1.1.1"}], []])
-    @patch("ddns.logging.info")
-    def test_main_no_changes(
-        self,
-        mock_info,
-        mock_get_dns,
-        mock_get_ips,
-        mock_load_config,
-        mock_setup,
-        mock_parse,
-    ):
-        """Test main returns 0 when no DNS changes are needed."""
-        mock_load_config.return_value = self.sample_config
-        result = ddns.main()
-        mock_info.assert_any_call("No changes needed, exiting.")
-        self.assertEqual(result, 0)
-
-    @patch("ddns.parse_args", return_value=("eth0", "up", False, "config.json"))
-    @patch("ddns.setup_logging")
-    @patch("ddns.load_config")
-    @patch("ddns.get_global_ip_addresses", return_value=[])
-    @patch("ddns.logging.error")
-    def test_main_no_local_ips(
-        self, mock_error, mock_get_ips, mock_load_config, mock_setup, mock_parse
-    ):
-        """Test main returns 1 when no local IPs are found."""
-        mock_load_config.return_value = self.sample_config
-        result = ddns.main()
-        mock_error.assert_called_with("No global IP addresses found, exiting.")
-        self.assertEqual(result, 1)
-
-    @patch("ddns.main", side_effect=Exception("Test error"))
-    @patch("ddns.logging.error")
-    @patch("ddns.exit")
-    def test_main_entry_point_exception_handling(
-        self, mock_exit, mock_error, mock_main
-    ):
-        """Test the if __name__ == '__main__' exception handling."""
-        # Simulate the entry point logic
-        try:
-            ddns.main()
-        except Exception as e:
-            ddns.logging.error(f"An unexpected error occurred: {e}")
-            ddns.exit(1)
-
-        mock_main.assert_called_once()
-        mock_error.assert_called_with("An unexpected error occurred: Test error")
-        mock_exit.assert_called_with(1)
-
-    @patch("ddns.parse_args", side_effect=Exception("Test exception"))
-    @patch("ddns.logging.critical")
-    def test_main_exception_handling(self, mock_critical, mock_parse_args):
-        """Test main handles exceptions and returns 1."""
-        result = ddns.main()
-        mock_critical.assert_called_with(
-            "An unrecoverable error occurred: Test exception.", exc_info=True
+        self.assertTrue(result)
+        mock_build_req.assert_called_once_with(
+            self.config, "DELETE", subpath=record_id, params=None
         )
-        self.assertEqual(result, 1)
+        mock_parse_resp.assert_called_once()
+
+    @patch("ddns.parse_api_response", return_value=None)
+    @patch("ddns.build_api_request")
+    def test_delete_dns_record_failure(self, mock_build_req, mock_parse_resp):
+        """Test the failure case for deleting a DNS record."""
+        result = ddns.delete_dns_record(self.config, "non_existent_id")
+        self.assertFalse(result)
+
+
+class TestDnsLogic(unittest.TestCase):
+    """Tests for the core DNS update logic."""
+
+    def setUp(self):
+        self.all_dns_records = [
+            {
+                "id": "id_ipv4_old",
+                "type": "A",
+                "name": "ddns.example.com",
+                "content": "1.1.1.1",
+            },
+            {
+                "id": "id_ipv6_current",
+                "type": "AAAA",
+                "name": "ddns.example.com",
+                "content": "2001:4:112::",
+            },
+        ]
+
+    def test_determine_dns_actions_no_change(self):
+        """Test when desired IPs match current DNS records."""
+        desired_ips = {"1.1.1.1", "2001:4:112::"}
+        ips_to_add, ids_to_remove = ddns.determine_dns_actions(
+            self.all_dns_records, desired_ips
+        )
+        self.assertEqual(ips_to_add, set())
+        self.assertEqual(ids_to_remove, set())
+
+    def test_determine_dns_actions_add_only(self):
+        """Test when only new IPs need to be added."""
+        desired_ips = {"1.1.1.1", "2001:4:112::", "2.2.2.2"}
+        ips_to_add, ids_to_remove = ddns.determine_dns_actions(
+            self.all_dns_records, desired_ips
+        )
+        self.assertEqual(ips_to_add, {"2.2.2.2"})
+        self.assertEqual(ids_to_remove, set())
+
+    def test_determine_dns_actions_remove_only(self):
+        """Test when only old DNS records need to be removed."""
+        desired_ips = {"2001:4:112::"}
+        ips_to_add, ids_to_remove = ddns.determine_dns_actions(
+            self.all_dns_records, desired_ips
+        )
+        self.assertEqual(ips_to_add, set())
+        self.assertEqual(ids_to_remove, {"id_ipv4_old"})
+
+    def test_determine_dns_actions_add_and_remove(self):
+        """Test when some records must be added and others removed."""
+        desired_ips = {"2.2.2.2"}
+        ips_to_add, ids_to_remove = ddns.determine_dns_actions(
+            self.all_dns_records, desired_ips
+        )
+        self.assertEqual(ips_to_add, {"2.2.2.2"})
+        self.assertEqual(ids_to_remove, {"id_ipv4_old", "id_ipv6_current"})
 
     @patch("ddns.ProcessPoolExecutor")
-    @patch(
-        "ddns.get_dns_records",
-        side_effect=[
-            [
-                {"id": "rec_v4_current", "content": "1.1.1.1"},
-                {"id": "rec_v4_stale", "content": "2.2.2.2"},
-            ],
-            [],  # No AAAA records
-        ],
-    )
-    @patch("ddns.get_global_ip_addresses", return_value=["1.1.1.1"])
-    @patch("ddns.load_config")
-    @patch("ddns.setup_logging")
-    @patch("ddns.parse_args", return_value=("eth0", "up", False, "config.json"))
-    def test_main_workflow_remove_only(
-        self,
-        mock_parse,
-        mock_setup,
-        mock_load_config,
-        mock_get_ips,
-        mock_get_dns,
-        mock_pool_class,
-    ):
-        """Test the main workflow when only DNS records need to be removed."""
-        mock_load_config.return_value = self.sample_config
-        mock_pool_instance = MagicMock()
-        mock_pool_class.return_value.__enter__.return_value = mock_pool_instance
-        mock_pool_instance.map = MagicMock()
+    def test_execute_dns_changes(self, mock_executor):
+        """Test the execution of DNS additions and deletions."""
+        # Mock the executor to run tasks sequentially for easier testing
+        mock_pool = MagicMock()
+        mock_pool.map.side_effect = lambda func, iterable: list(map(func, iterable))
+        mock_executor.return_value.__enter__.return_value = mock_pool
 
-        # Run the main function
-        ddns.main()
+        mock_add = MagicMock()
+        mock_delete = MagicMock()
 
-        # Assert that pool.map was called only once (for deletion)
-        self.assertEqual(mock_pool_instance.map.call_count, 1)
+        ips_to_add = {"1.2.3.4", "2001:db8::2"}
+        ids_to_remove = ["id_old_1", "id_old_2"]
 
-        # Check that the call was for deleting records
-        delete_call_args = mock_pool_instance.map.call_args[0]
-        self.assertEqual(delete_call_args[0].func.__name__, "delete_dns_record")
-        self.assertEqual(list(delete_call_args[1]), ["rec_v4_stale"])
+        ddns.execute_dns_changes(ips_to_add, ids_to_remove, mock_add, mock_delete)
+
+        self.assertEqual(mock_add.call_count, 2)
+        mock_add.assert_any_call("1.2.3.4")
+        mock_add.assert_any_call("2001:db8::2")
+
+        self.assertEqual(mock_delete.call_count, 2)
+        mock_delete.assert_any_call("id_old_1")
+        mock_delete.assert_any_call("id_old_2")
 
     @patch("ddns.ProcessPoolExecutor")
-    @patch(
-        "ddns.get_dns_records",
-        side_effect=[
-            [],  # No existing A records
-            [],  # No existing AAAA records
-        ],
-    )
-    @patch("ddns.get_global_ip_addresses", return_value=["1.1.1.1"])
-    @patch("ddns.load_config")
-    @patch("ddns.setup_logging")
-    @patch("ddns.parse_args", return_value=("eth0", "up", False, "config.json"))
-    def test_main_workflow_add_only(
-        self,
-        mock_parse,
-        mock_setup,
-        mock_load_config,
-        mock_get_ips,
-        mock_get_dns,
-        mock_pool_class,
-    ):
-        """Test the main workflow when only DNS records need to be added."""
-        mock_load_config.return_value = self.sample_config
-        mock_pool_instance = MagicMock()
-        mock_pool_class.return_value.__enter__.return_value = mock_pool_instance
-        mock_pool_instance.map = MagicMock()
+    def test_execute_dns_changes_no_op(self, mock_executor):
+        """Test that no functions are called when there are no changes."""
+        mock_add = MagicMock()
+        mock_delete = MagicMock()
+        ddns.execute_dns_changes(set(), set(), mock_add, mock_delete)
+        mock_add.assert_not_called()
+        mock_delete.assert_not_called()
+        mock_executor.assert_not_called()
 
-        # Run the main function
-        ddns.main()
 
-        # Assert that pool.map was called only once (for addition)
-        self.assertEqual(mock_pool_instance.map.call_count, 1)
+class TestMainFunction(unittest.TestCase):
+    """Integration-style tests for the main function's control flow."""
 
-        # Check that the call was for adding records
-        add_call_args = mock_pool_instance.map.call_args[0]
-        self.assertEqual(add_call_args[0].func.__name__, "add_dns_record")
-        self.assertEqual(list(add_call_args[1]), ["1.1.1.1"])
-
-    @patch("ddns.sleep")
-    @patch("ddns.ProcessPoolExecutor")
-    @patch("ddns.get_dns_records", return_value=[])
-    @patch("ddns.get_global_ip_addresses", return_value=["1.1.1.1"])
-    @patch("ddns.load_config")
-    @patch("ddns.setup_logging")
-    @patch("ddns.parse_args", return_value=("eth0", "up", True, "config.json"))
-    def test_main_debug_mode_skips_sleep(
-        self,
-        mock_parse,
-        mock_setup,
-        mock_load_config,
-        mock_get_ips,
-        mock_get_dns,
-        mock_pool,
-        mock_sleep,
-    ):
-        """Test that main() skips the sleep call when in debug mode."""
-        mock_load_config.return_value = self.sample_config
-
-        # Run the main function
-        ddns.main()
-
-        # Assert that sleep was NOT called because is_debug is True
-        mock_sleep.assert_not_called()
-
-    @patch("ddns.parse_args")
+    @patch("ddns.parse_args", return_value=("eth0", "up", False, "dummy_path"))
     @patch("ddns.setup_logging")
     @patch("ddns.load_config")
     @patch("ddns.get_global_ip_addresses")
     @patch("ddns.get_dns_records")
-    @patch("ddns.ProcessPoolExecutor")  # Mock the executor to run tasks sequentially
-    def test_main_workflow(
+    @patch("ddns.determine_dns_actions")
+    @patch("ddns.execute_dns_changes")
+    def test_main_successful_run(
         self,
-        MockExecutor,
-        mock_get_dns,
+        mock_execute,
+        mock_determine,
+        mock_get_records,
         mock_get_ips,
-        mock_load_config,
-        mock_setup_logging,
-        mock_parse_args,
+        mock_load,
+        mock_setup,
+        mock_parse,
     ):
-        """Test the main function's overall workflow."""
-        # --- Setup Mocks ---
-        mock_parse_args.return_value = ("eth0", "up", False, "config.json")
-        mock_load_config.return_value = self.sample_config
+        """Test the main function's successful execution path."""
+        # Setup mocks
+        mock_get_ips.return_value = {"1.2.3.4"}
+        mock_get_records.return_value = [{"content": "1.1.1.1"}]
+        mock_determine.return_value = ({"1.2.3.4"}, {"record_id_to_delete"})
 
-        # Simulate local IPs
-        mock_get_ips.return_value = ["1.1.1.1", "2001:db8::1"]
+        # Run main
+        exit_code = ddns.main()
 
-        # Simulate remote DNS records
-        mock_get_dns.side_effect = [
-            [{"id": "rec_v4_old", "content": "2.2.2.2", "type": "A"}],  # A records
-            [
-                {"id": "rec_v6_keep", "content": "2001:db8::1", "type": "AAAA"}
-            ],  # AAAA records
-        ]
+        # Assertions
+        self.assertEqual(exit_code, 0)
+        mock_parse.assert_called_once()
+        mock_setup.assert_called_once_with(False)
+        mock_load.assert_called_once_with("dummy_path")
+        mock_get_ips.assert_called_once_with("eth0")
+        mock_get_records.assert_called_once()
+        mock_determine.assert_called_once_with([{"content": "1.1.1.1"}], {"1.2.3.4"})
+        mock_execute.assert_called_once_with(
+            {"1.2.3.4"}, {"record_id_to_delete"}, ANY, ANY
+        )
 
-        # Mock the ProcessPoolExecutor to test its usage
-        # We need a mock that can handle the 'with' statement and 'map'
-        mock_pool_instance = MagicMock()
-        mock_pool_instance.map = MagicMock()
-        MockExecutor.return_value.__enter__.return_value = mock_pool_instance
+    @patch("ddns.parse_args", return_value=("eth0", "up", False, "dummy_path"))
+    @patch("ddns.setup_logging")
+    @patch("ddns.load_config")
+    @patch("ddns.get_global_ip_addresses")
+    @patch("ddns.get_dns_records")
+    @patch("ddns.determine_dns_actions")
+    @patch("ddns.execute_dns_changes")
+    def test_main_successful_run_with_no_changes(
+        self,
+        mock_execute,
+        mock_determine,
+        mock_get_records,
+        mock_get_ips,
+        mock_load,
+        mock_setup,
+        mock_parse,
+    ):
+        """Test the main function when no DNS changes are needed."""
+        # Setup mocks
+        mock_get_ips.return_value = {}
+        mock_get_records.return_value = []
+        mock_determine.return_value = ()
+        mock_parse.return_value = ("eth0", "up", True, "dummy_path")
 
-        # --- Mock add/delete functions that are called by the pool ---
-        with (
-            patch("ddns.add_dns_record") as mock_add_record,
-            patch("ddns.delete_dns_record") as mock_delete_record,
-        ):
-            # --- Run main function ---
-            ddns.main()
+        exit_code = ddns.main()
 
-            # --- Assertions ---
-            mock_setup_logging.assert_called_with(False)
-            mock_get_ips.assert_called_with("eth0")
+        self.assertEqual(exit_code, 0)
+        mock_parse.assert_called_once()
+        mock_setup.assert_called_once_with(True)
+        mock_load.assert_called_once_with("dummy_path")
+        mock_get_ips.assert_called_once_with("eth0")
+        mock_get_records.assert_not_called()
+        mock_determine.assert_not_called()
+        mock_execute.assert_not_called()
 
-            # Check that get_dns_records was called for A and AAAA
-            self.assertEqual(mock_get_dns.call_count, 2)
-
-            # The executor's map should be called for additions and deletions
-            # Check additions: '1.1.1.1' is new
-            add_call_args = mock_pool_instance.map.call_args_list[0][0]
-            self.assertEqual(add_call_args[0].func, mock_add_record)
-            self.assertEqual(list(add_call_args[1]), ["1.1.1.1"])
-
-            # Check deletions: '2.2.2.2' is old
-            delete_call_args = mock_pool_instance.map.call_args_list[1][0]
-            self.assertEqual(delete_call_args[0].func, mock_delete_record)
-            self.assertEqual(list(delete_call_args[1]), ["rec_v4_old"])
+    @patch("ddns.parse_args")
+    @patch("ddns.setup_logging")
+    def test_main_config_load_failure(self, mock_setup, mock_parse):
+        """Test main function's behavior when config loading fails."""
+        mock_parse.return_value = ("eth0", "up", False, "bad_path")
+        # Patch load_config to raise an error
+        with patch("ddns.load_config", side_effect=FileNotFoundError):
+            exit_code = ddns.main()
+            self.assertEqual(exit_code, 1)
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    unittest.main()

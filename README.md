@@ -10,6 +10,8 @@ A lightweight, dependency-free Python script that automatically updates your Clo
 - **Robust IP Detection**: Reliably finds global IP addresses using the modern `ip -j addr` command.
 - **Proxy Support**: Can route Cloudflare API requests through an HTTP or SOCKS5 proxy.
 - **Efficient**: Only updates Cloudflare if it detects that your IP address has actually changed.
+- **100% Test Coverage**: robust by test
+- **Functional Programming**: easy to debug and maintain
 
 ## Prerequisites
 
@@ -25,10 +27,11 @@ A lightweight, dependency-free Python script that automatically updates your Clo
     Copy the `ddns-py` script to the NetworkManager dispatcher directory. It's good practice to name it in a way that controls execution order, for example, `99-cf-ddns`.
 
     ```bash
-    sudo cp ddns-py /etc/NetworkManager/dispatcher.d/99-cf-ddns
+    sudo cp ddns.py /etc/NetworkManager/dispatcher.d/99-cf-ddns
     ```
-  > [!note]
-  > The script must have execute permissions to be run by NetworkManager.
+
+    > [!note]
+    > The script must have execute permissions to be run by NetworkManager.
 
 1.  **Create the Configuration Directory**
 
@@ -38,7 +41,7 @@ A lightweight, dependency-free Python script that automatically updates your Clo
     sudo mkdir -p /etc/NetworkManager/dispatcher.d/ddns
     ```
 
-2.  **Create the Configuration File**
+1.  **Create the Configuration File**
 
     Create your configuration file at `/etc/NetworkManager/dispatcher.d/ddns/config.json`.
 
@@ -85,7 +88,7 @@ Once installed and configured, the script will run automatically whenever Networ
 
 ### Manual Execution (for Testing)
 
-You can trigger the script manually to test your configuration. NetworkManager normally passes two arguments: the interface and the action. 
+You can trigger the script manually to test your configuration. NetworkManager normally passes two arguments: the interface and the action.
 
 > [!note]
 > The debug config should be located at `.\ddns\config.json`
