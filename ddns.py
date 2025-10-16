@@ -195,7 +195,7 @@ def build_api_request(
     Args:
         config (Config): Configuration object containing authentication details.
         method (Literal["GET", "POST", "DELETE"]): HTTP method.
-        params (str | None): URL parameters to append to the endpoint, optional.
+        params (str | None): encoded URL parameters to append to the endpoint, optional.
         subpath (str | None): API endpoint subpath, optional.
         data (dict[str, any] | None, optional): The request payload, optional.
 
@@ -225,7 +225,7 @@ def build_api_request(
         f"https://api.cloudflare.com/client/v4/zones/{config.zone_id}/dns_records"
     )
     url = f"{endpoint}/{subpath}" if subpath else endpoint
-    url = f"{url}?{parse.urlencode(params)}" if params else url
+    url = f"{url}?{params}" if params else url
 
     req = request.Request(url, method=method, data=body, headers=headers)
 
