@@ -298,12 +298,12 @@ def get_dns_records(
         return None
 
 
-def add_dns_record(config: Config, content: str, logger: logging.Logger) -> bool:
+def add_dns_record(content: str, config: Config, logger: logging.Logger) -> bool:
     """Add a new DNS record with the given name and content.
 
     Args:
-        config (Config): Configuration object containing authentication details.
         content (str): content for the new DNS, usually an IP address.
+        config (Config): Configuration object containing authentication details.
         logger (logging.Logger): Logger instance for logging messages.
 
     Returns:
@@ -334,12 +334,12 @@ def add_dns_record(config: Config, content: str, logger: logging.Logger) -> bool
         return False
 
 
-def delete_dns_record(config: Config, record_id: str, logger: logging.Logger) -> bool:
+def delete_dns_record(record_id: str, config: Config, logger: logging.Logger) -> bool:
     """Delete a DNS record by its ID.
 
     Args:
-        config (Config): Configuration object containing authentication details.
         record_id (str): the ID of the DNS record to delete
+        config (Config): Configuration object containing authentication details.
         logger (logging.Logger): Logger instance for logging messages.
 
     Returns:
@@ -349,7 +349,7 @@ def delete_dns_record(config: Config, record_id: str, logger: logging.Logger) ->
     req = build_api_request(
         config, method="DELETE", subpath=record_id, params=None, logger=logger
     )
-    response = parse_api_response(req.logger)
+    response = parse_api_response(req, logger)
     if response and response.get("success"):
         logger.info(f"DNS record {record_id} deleted successfully.")
         return True
@@ -407,14 +407,14 @@ def execute_dns_changes(
     with ProcessPoolExecutor() as pool:
         if ips_to_add != set():  # pragma: no branch, already checked
             add_op_results = pool.map(add_record_func, ips_to_add)
+            for ip, success in zip(ips_to_add, add_op_results):
+                if not success:
+                    logger.error(f"Failed to add DNS record for IP: {ip}")
         if record_ids_to_remove != set():  # pragma: no branch, already checked
             remove_op_results = pool.map(delete_record_func, record_ids_to_remove)
-        for record, success in zip(ips_to_add, add_op_results):
-            if not success:
-                logger.error(f"Failed to add DNS record for IP: {record}")
-        for record_id, success in zip(record_ids_to_remove, remove_op_results):
-            if not success:
-                logger.error(f"Failed to delete DNS record with ID: {record_id}")
+            for record_id, success in zip(record_ids_to_remove, remove_op_results):
+                if not success:
+                    logger.error(f"Failed to delete DNS record with ID: {record_id}")
     logger.info("DNS records update completed.")
 
 
