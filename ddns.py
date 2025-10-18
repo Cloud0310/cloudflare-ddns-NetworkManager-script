@@ -405,10 +405,16 @@ def execute_dns_changes(
     logger.debug(f"IPs to add: {', '.join(ips_to_add)}")
     logger.debug(f"Record IDs to remove: {', '.join(record_ids_to_remove)}")
     with ProcessPoolExecutor() as pool:
-        if ips_to_add:  # pragma: no branch, already checked
-            pool.map(add_record_func, ips_to_add)
-        if record_ids_to_remove:  # pragma: no branch, already checked
-            pool.map(delete_record_func, record_ids_to_remove)
+        if ips_to_add != set():  # pragma: no branch, already checked
+            add_op_results = pool.map(add_record_func, ips_to_add)
+        if record_ids_to_remove != set():  # pragma: no branch, already checked
+            remove_op_results = pool.map(delete_record_func, record_ids_to_remove)
+        for record, success in zip(ips_to_add, add_op_results):
+            if not success:
+                logger.error(f"Failed to add DNS record for IP: {record}")
+        for record_id, success in zip(record_ids_to_remove, remove_op_results):
+            if not success:
+                logger.error(f"Failed to delete DNS record with ID: {record_id}")
     logger.info("DNS records update completed.")
 
 
