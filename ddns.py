@@ -3,26 +3,32 @@
 import json
 import logging
 from argparse import ArgumentParser
-from concurrent.futures import ProcessPoolExecutor
+import asyncio
 from dataclasses import dataclass
 from functools import partial
 from ipaddress import ip_address
 from itertools import chain
 from shutil import which
-from subprocess import CalledProcessError, check_output
 from sys import exit, stdout
-from time import sleep
-from typing import Callable, Literal, Any
+from typing import Literal, Any
+from collections.abc import Callable, Awaitable
 from urllib import error, parse, request
 
 
 @dataclass
 class Config:
-    email: str
     api_key: str
-    zone_id: str
-    domain_to_bind: str
     api_request_proxy: str | None
+    domain_to_bind: str
+    email: str
+    zone_id: str
+
+
+@dataclass
+class Options:
+    ACTION: str
+    INTERFACE: str | None
+    debug: bool = False
 
 
 # colorful logging formatter
@@ -63,17 +69,12 @@ def setup_logging(is_debug: bool, logger: logging.Logger) -> None:
 
     logger.setLevel(log_level)
     logger.addHandler(handler)
+
+    logger.propagate = False  # prevent double logging
     logging.debug("Debug mode is enabled.")
 
 
-@dataclass
-class Options:
-    INTERFACE: str | None
-    ACTION: str
-    DEBUG: bool = False
-
-
-def parse_args(args: list[str] | None = None) -> Options:
+def parse_options(args: list[str] | None = None) -> Options:
     """Parse Command Line Args
 
     Args:
@@ -101,16 +102,17 @@ def parse_args(args: list[str] | None = None) -> Options:
     )
     parser.add_argument(
         "--debug",
-        action="store_const",
         type=bool,
         default=False,
         help="Enable debug mode.",
     )
 
-    return Options(**parser.parse_args(args=args).vars())
+    return Options(**vars(parser.parse_args(args)))
 
 
-def load_config(logger: logging.Logger, config_path: str = "config.json") -> Config:
+async def load_config(
+    logger: logging.Logger, config_path: str = "config.json"
+) -> Config:
     """Load configuration from a JSON file.
     Args:
         logger (logging.Logger): Logger instance for logging messages.
@@ -138,7 +140,9 @@ def load_config(logger: logging.Logger, config_path: str = "config.json") -> Con
         raise
 
 
-def get_global_ip_addresses(interface: str | None, logger: logging.Logger) -> list[str]:
+async def get_global_ip_addresses(
+    interface: str | None, logger: logging.Logger
+) -> list[str]:
     """Get global (public) IPv4 and IPv6 addresses for a given network interface.
 
     Args:
@@ -162,11 +166,18 @@ def get_global_ip_addresses(interface: str | None, logger: logging.Logger) -> li
     else:
         logger.warning("No network interface specified, check all the interfaces.")
     try:
-        out = check_output(args)
-    except CalledProcessError as e:
-        raise RuntimeError(f"Failed to execute 'ip' command: {e}") from e
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
 
-    data: list[dict[str, Any]] = json.loads(out)
+        if proc.returncode != 0:
+            raise RuntimeError(f"Error executing ip command: {stderr.decode()}")
+
+        data = json.loads(stdout.decode())
+    except Exception as e:
+        logger.error(f"Failed to get IP addresses: {e}")
+        return []
 
     addr_infos: list[dict[str, Any]] = list(
         chain.from_iterable(map(lambda iface: iface.get("addr_info", []), data))
@@ -227,10 +238,10 @@ def build_api_request(
         request.install_opener(opener)
         logger.info(f"Using proxy for API requests: {config.api_request_proxy}")
 
-    endpoint = (
+    base_url = (
         f"https://api.cloudflare.com/client/v4/zones/{config.zone_id}/dns_records"
     )
-    url = f"{endpoint}/{subpath}" if subpath else endpoint
+    url = f"{base_url}/{subpath}?{params}" if subpath else base_url
     url = f"{url}?{params}" if params else url
 
     req = request.Request(url, method=method, data=body, headers=headers)
@@ -239,7 +250,7 @@ def build_api_request(
 
 
 # impure function to handle Network IO
-def parse_api_response(
+async def parse_api_response(
     req: request.Request, logger: logging.Logger
 ) -> dict[str, Any] | None:
     """Open and parse the API response.
@@ -263,7 +274,7 @@ def parse_api_response(
         return None
 
 
-def get_dns_records(
+async def get_dns_records(
     config: Config, logger: logging.Logger
 ) -> list[dict[str, int | bool | str]] | None:
     """Get DNS records of type "A" and "AAAA".
@@ -285,7 +296,7 @@ def get_dns_records(
         params=params,
     )
 
-    response = parse_api_response(req, logger)
+    response = await parse_api_response(req, logger)
 
     # fliter the records to only include A and AAAA types
     if response and response.get("success"):
@@ -301,7 +312,7 @@ def get_dns_records(
         return None
 
 
-def add_dns_record(content: str, config: Config, logger: logging.Logger) -> bool:
+async def add_dns_record(content: str, config: Config, logger: logging.Logger) -> bool:
     """Add a new DNS record with the given name and content.
 
     Args:
@@ -325,7 +336,7 @@ def add_dns_record(content: str, config: Config, logger: logging.Logger) -> bool
     req = build_api_request(
         config, method="POST", subpath=None, params=None, data=data, logger=logger
     )
-    resp = parse_api_response(req, logger)
+    resp = await parse_api_response(req, logger)
 
     if resp and resp.get("success"):
         logger.info(
@@ -337,7 +348,9 @@ def add_dns_record(content: str, config: Config, logger: logging.Logger) -> bool
         return False
 
 
-def delete_dns_record(record_id: str, config: Config, logger: logging.Logger) -> bool:
+async def delete_dns_record(
+    record_id: str, config: Config, logger: logging.Logger
+) -> bool:
     """Delete a DNS record by its ID.
 
     Args:
@@ -352,7 +365,7 @@ def delete_dns_record(record_id: str, config: Config, logger: logging.Logger) ->
     req = build_api_request(
         config, method="DELETE", subpath=record_id, params=None, logger=logger
     )
-    response = parse_api_response(req, logger)
+    response = await parse_api_response(req, logger)
     if response and response.get("success"):
         logger.info(f"DNS record {record_id} deleted successfully.")
         return True
@@ -385,11 +398,11 @@ def determine_dns_actions(
     return ips_to_add, record_ids_to_remove
 
 
-def execute_dns_changes(
+async def execute_dns_changes(
     ips_to_add: set[str],
     record_ids_to_remove: set[str],
-    add_record_func: Callable[[str], bool],
-    delete_record_func: Callable[[str], bool],
+    add_record_func: Callable[[str], Awaitable[bool]],
+    delete_record_func: Callable[[str], Awaitable[bool]],
     logger: logging.Logger,
 ) -> None:
     """Execute DNS changes in parallel using ProcessPoolExecutor.
@@ -399,53 +412,65 @@ def execute_dns_changes(
         record_ids_to_remove (list[str]): List of DNS record IDs to remove.
         add_record_func (Callable[[str], bool]): Function to add a DNS record.
         delete_record_func (Callable[[str], bool]): Function to delete a DNS record.
-        logger (logging.Logger): Logger instance for logging messages.
-    """
+        logger (logging.Logger): Logger instance for logging messages."""
     if not (ips_to_add or record_ids_to_remove):
         logger.info("No DNS changes needed.")
         return
     logger.info("IP addresses have been changed, updating DNS records...")
     logger.debug(f"IPs to add: {', '.join(ips_to_add)}")
     logger.debug(f"Record IDs to remove: {', '.join(record_ids_to_remove)}")
-    with ProcessPoolExecutor() as pool:
-        if ips_to_add != set():  # pragma: no branch, already checked
-            add_op_results = pool.map(add_record_func, ips_to_add)
-            for ip, success in zip(ips_to_add, add_op_results):
-                if not success:
-                    logger.error(f"Failed to add DNS record for IP: {ip}")
-        if record_ids_to_remove != set():  # pragma: no branch, already checked
-            remove_op_results = pool.map(delete_record_func, record_ids_to_remove)
-            for record_id, success in zip(record_ids_to_remove, remove_op_results):
-                if not success:
-                    logger.error(f"Failed to delete DNS record with ID: {record_id}")
+
+    add_tasks = [add_record_func(ip) for ip in ips_to_add]
+    delete_tasks = [delete_record_func(rid) for rid in record_ids_to_remove]
+
+    add_results = await asyncio.gather(*add_tasks)
+    delete_results = await asyncio.gather(*delete_tasks)
+
+    for ip, result in zip(ips_to_add, add_results):
+        if result:
+            logger.debug(f"Successfully added DNS record for IP: {ip}")
+        else:
+            logger.error(f"Failed to add DNS record for IP: {ip}")
+    for rid, result in zip(record_ids_to_remove, delete_results):
+        if result:
+            logger.debug(f"Successfully deleted DNS record ID: {rid}")
+        else:
+            logger.error(f"Failed to delete DNS record ID: {rid}")
+
     logger.info("DNS records update completed.")
 
 
 # --- Main function ---
-def main() -> Literal[0, 1]:
+async def main() -> Literal[0, 1]:
     """Main function"""
     try:
-        options = parse_args()
+        options = parse_options()
+
+        logger = logging.getLogger("ddns")
+        setup_logging(options.debug, logger)
+        if options.ACTION not in ("up", "dhcp4-change", "dhcp6-change"):
+            logger.info(f"Ignoring action '{options.ACTION}', no updates performed.")
+            return 0
+
         config_path = (
             "/etc/NetworkManager/dispatcher.d/ddns/config.json"
-            if not options.DEBUG
+            if not options.debug
             else "./ddns/config.json"
         )
-        logger = logging.getLogger("ddns")
-        setup_logging(options.DEBUG, logger)
-        if not options.DEBUG:
-            logger.info("Waiting for network to be stabilize... 2s")
-            sleep(3)  # wait for the network to be fully up
 
-        config = load_config(logger, config_path)
-        target_ips = set(get_global_ip_addresses(options.INTERFACE, logger))
+        if not options.debug:
+            logger.info("Waiting for network to be stabilize... 2s")
+            await asyncio.sleep(3)  # wait for the network to be fully up
+
+        config = await load_config(logger, config_path)
+        target_ips = set(await get_global_ip_addresses(options.INTERFACE, logger))
         if not target_ips:
             logger.warning("No global IP addresses found, exiting.")
             return 0
         else:
             logger.info(f"Local global IP addresses: {', '.join(target_ips)}")
 
-        all_records = get_dns_records(config, logger)
+        all_records = await get_dns_records(config, logger)
 
         logger.debug(f"Current DNS records: {all_records}")
 
@@ -462,7 +487,7 @@ def main() -> Literal[0, 1]:
             delete_dns_record, config=config, logger=logger
         )
 
-        execute_dns_changes(
+        await execute_dns_changes(
             ips_to_add,
             record_ids_to_remove,
             add_records_with_config,
@@ -478,7 +503,7 @@ def main() -> Literal[0, 1]:
 
 if __name__ == "__main__":
     try:
-        exit_code = main()
+        exit_code = asyncio.run(main())
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}")
         exit(1)
