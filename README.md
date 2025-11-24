@@ -2,6 +2,13 @@
 
 A lightweight, dependency-free Python script that automatically updates your Cloudflare DNS records with your machine's public IP addresses. It's designed to run as a [NetworkManager dispatcher](https://networkmanager.dev/docs/api/latest/NetworkManager-dispatcher.html) script, making it ideal for servers or desktops with dynamic IPs.
 
+## TODOs
+
+- Use pytest for coverage showing and better code structure
+- Async Updates
+- Adding support for systemd udev based detection, unbind the NetworkManager
+  vendor
+
 ## Features
 
 - **Automatic Updates**: Integrates seamlessly with NetworkManager to update DNS records on network events (like `up`, `connectivity-change`).

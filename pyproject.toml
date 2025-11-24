@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["coverage[toml]>=7.10.7"]
+dependencies = [
+    "coverage[toml]>=7.10.7",
+    "pytest>=9.0.1",
+    "pytest-asyncio>=1.3.0",
+]
 [tool.coverage.report]
 exclude_also = ["if __name__ == .__main__.:"]
 [tool.coverage.run]

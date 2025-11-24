@@ -8,12 +8,11 @@ from dataclasses import dataclass
 from functools import partial
 from ipaddress import ip_address
 from itertools import chain
-from os import getenv
 from shutil import which
 from subprocess import CalledProcessError, check_output
 from sys import exit, stdout
 from time import sleep
-from typing import Callable, Literal, Sequence
+from typing import Callable, Literal, Any
 from urllib import error, parse, request
 
 
@@ -33,16 +32,16 @@ class CustomFormatter(logging.Formatter):
     red = "\x1b[31;20m"
     bold_red = "\x1b[31;1m"
     reset = "\x1b[0m"
-    format = (
+    _format = (
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s (%(filename)s:%(lineno)d)"
     )
 
     FORMATS = {
-        logging.DEBUG: grey + format + reset,
-        logging.INFO: grey + format + reset,
-        logging.WARNING: yellow + format + reset,
-        logging.ERROR: red + format + reset,
-        logging.CRITICAL: bold_red + format + reset,
+        logging.DEBUG: grey + _format + reset,
+        logging.INFO: grey + _format + reset,
+        logging.WARNING: yellow + _format + reset,
+        logging.ERROR: red + _format + reset,
+        logging.CRITICAL: bold_red + _format + reset,
     }
 
     def format(self, record):
@@ -67,19 +66,23 @@ def setup_logging(is_debug: bool, logger: logging.Logger) -> None:
     logging.debug("Debug mode is enabled.")
 
 
-def parse_args(args: Sequence[str] | None = None) -> tuple[str, str, bool, str]:
+@dataclass
+class Options:
+    INTERFACE: str | None
+    ACTION: str
+    DEBUG: bool = False
+
+
+def parse_args(args: list[str] | None = None) -> Options:
     """Parse Command Line Args
 
     Args:
-        args (Sequence[str] | None, optional): System args. Defaults to None.
+        args (list[str] | None, optional): System args. Defaults to None.
 
     Returns:
-        tuple[str, str, bool, str]: A tuple containing:
-            - INTERFACE (str): Network interface that triggered the script.
-            - ACTION (str): NetworkManager action to trigger the script.
-            - is_debug (bool): True if DEBUG environment variable is set to "1".
-            - config_path (str): Path to the configuration file.
+        Options: Parsed options as dataclass.
     """
+
     parser = ArgumentParser(
         prog="ddns.py",
         usage="ddns.py INTERFACE ACTION",
@@ -96,14 +99,15 @@ def parse_args(args: Sequence[str] | None = None) -> tuple[str, str, bool, str]:
         type=str,
         help="NetworkManager action to trigger the script.",
     )
-    args = parser.parse_args(args)
-    is_debug = getenv("DEBUG") == "1"
-    config_path = (
-        "/etc/NetworkManager/dispatcher.d/ddns/config.json"
-        if not is_debug
-        else "./ddns/config.json"  # use a local config file for debugging
+    parser.add_argument(
+        "--debug",
+        action="store_const",
+        type=bool,
+        default=False,
+        help="Enable debug mode.",
     )
-    return args.INTERFACE.strip(), args.ACTION.strip(), is_debug, config_path
+
+    return Options(**parser.parse_args(args=args).vars())
 
 
 def load_config(logger: logging.Logger, config_path: str = "config.json") -> Config:
@@ -162,9 +166,9 @@ def get_global_ip_addresses(interface: str | None, logger: logging.Logger) -> li
     except CalledProcessError as e:
         raise RuntimeError(f"Failed to execute 'ip' command: {e}") from e
 
-    data: list[dict[str, any]] = json.loads(out)
+    data: list[dict[str, Any]] = json.loads(out)
 
-    addr_infos: list[dict[str, any]] = list(
+    addr_infos: list[dict[str, Any]] = list(
         chain.from_iterable(map(lambda iface: iface.get("addr_info", []), data))
     )
 
@@ -188,9 +192,9 @@ def build_api_request(
     config: Config,
     method: Literal["GET", "POST", "DELETE"],
     logger: logging.Logger,
-    subpath: dict[str, str] | None = None,
+    subpath: str | None = None,
     params: str | None = None,
-    data: dict[str, any] | None = None,
+    data: dict[str, Any] | None = None,
 ) -> request.Request:
     """Build an API request to Cloudflare.
 
@@ -200,7 +204,7 @@ def build_api_request(
         logger (logging.Logger): Logger instance for logging messages.
         params (str | None): encoded URL parameters to append to the endpoint, optional.
         subpath (str | None): API endpoint subpath, optional.
-        data (dict[str, any] | None, optional): The request payload, optional.
+        data (dict[str, Any] | None, optional): The request payload, optional.
 
     Returns:
         request.Request: a Request object if the request was successful, None otherwise
@@ -212,8 +216,7 @@ def build_api_request(
     }
     body = json.dumps(data).encode("utf-8") if data else None
 
-    proxy = config.api_request_proxy
-    if proxy is not None:
+    if config.api_request_proxy is not None:
         proxy_handler = request.ProxyHandler(
             {
                 "http": config.api_request_proxy,
@@ -238,14 +241,14 @@ def build_api_request(
 # impure function to handle Network IO
 def parse_api_response(
     req: request.Request, logger: logging.Logger
-) -> dict[str, any] | None:
+) -> dict[str, Any] | None:
     """Open and parse the API response.
 
     Args:
         req (request.Request): A request Object
 
     Returns:
-        dict[str, any] | None: The reponse data in json format
+        dict[str, Any] | None: The reponse data in json format
         logger (logging.Logger): Logger instance for logging messages.
     """
     try:
@@ -275,7 +278,7 @@ def get_dns_records(
 
     params = parse.urlencode({"name": config.domain_to_bind})
 
-    req: dict[str, any] | None = build_api_request(
+    req = build_api_request(
         config,
         method="GET",
         logger=logger,
@@ -359,12 +362,12 @@ def delete_dns_record(record_id: str, config: Config, logger: logging.Logger) ->
 
 
 def determine_dns_actions(
-    all_dns_records: list[dict[str, any]], desired_ips: set[str]
+    all_dns_records: list[dict[str, Any]], desired_ips: set[str]
 ) -> tuple[set[str], set[str]]:
     """Determine which DNS records need to be added or removed.
 
     Args:
-        all_dns_records (list[dict[str, any]]): List of current DNS records.
+        all_dns_records (list[dict[str, Any]]): List of current DNS records.
         desired_ips (set[str]): Set of desired IP addresses.
 
     Returns:
@@ -384,7 +387,7 @@ def determine_dns_actions(
 
 def execute_dns_changes(
     ips_to_add: set[str],
-    record_ids_to_remove: list[str],
+    record_ids_to_remove: set[str],
     add_record_func: Callable[[str], bool],
     delete_record_func: Callable[[str], bool],
     logger: logging.Logger,
@@ -422,15 +425,20 @@ def execute_dns_changes(
 def main() -> Literal[0, 1]:
     """Main function"""
     try:
-        interface, action, is_debug, config_path = parse_args()
+        options = parse_args()
+        config_path = (
+            "/etc/NetworkManager/dispatcher.d/ddns/config.json"
+            if not options.DEBUG
+            else "./ddns/config.json"
+        )
         logger = logging.getLogger("ddns")
-        setup_logging(is_debug, logger)
-        if not is_debug:
+        setup_logging(options.DEBUG, logger)
+        if not options.DEBUG:
             logger.info("Waiting for network to be stabilize... 2s")
             sleep(3)  # wait for the network to be fully up
 
         config = load_config(logger, config_path)
-        target_ips = set(get_global_ip_addresses(interface, logger))
+        target_ips = set(get_global_ip_addresses(options.INTERFACE, logger))
         if not target_ips:
             logger.warning("No global IP addresses found, exiting.")
             return 0
