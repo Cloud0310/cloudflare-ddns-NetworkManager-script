@@ -212,3 +212,5 @@ __marimo__/
 ddns/config.json
 .vscode
 coverage.lcov
+
+trace/
