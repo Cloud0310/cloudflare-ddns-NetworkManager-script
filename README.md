@@ -95,13 +95,13 @@ You can trigger the script manually to test your configuration. NetworkManager n
 
 ```bash
 # Example: Manually trigger for the 'eth0' interface with an 'up' event
-sudo ./ddns-py.py eth0 up
+sudo ./ddns.py eth0 up
 ```
 
 For more detailed logs during manual testing, set the `DEBUG` environment variable:
 
 ```bash
-sudo DEBUG=1 ./ddns-py.py eth0 up
+sudo DEBUG=1 ./ddns.py eth0 up
 ```
 
 ## Troubleshooting

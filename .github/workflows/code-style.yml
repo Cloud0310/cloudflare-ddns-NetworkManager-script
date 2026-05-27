@@ -7,7 +7,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: linter
         uses: astral-sh/ruff-action@v3
-      - name: formater
+      - name: formatter
         run: ruff format
       - name: commit changes
         uses: stefanzweifel/git-auto-commit-action@v6
