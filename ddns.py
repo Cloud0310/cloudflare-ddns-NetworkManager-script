@@ -314,9 +314,7 @@ def add_dns_record(content: str, config: Config) -> bool:
     resp = parse_api_response(req)
 
     if resp and resp.get("success"):
-        LOG.info(
-            f"DNS record added successfully: {config.domain_to_bind} -> {content}"
-        )
+        LOG.info(f"DNS record added successfully: {config.domain_to_bind} -> {content}")
         return True
     else:
         LOG.error("Failed to add DNS record")
@@ -334,9 +332,7 @@ def delete_dns_record(record_id: str, config: Config) -> bool:
         bool: True if the deletion was successful, False otherwise
     """
     LOG.debug(f"Deleting DNS record with ID: {record_id}")
-    req = build_api_request(
-        config, method="DELETE", subpath=record_id, params=None
-    )
+    req = build_api_request(config, method="DELETE", subpath=record_id, params=None)
     response = parse_api_response(req)
     if response and response.get("success"):
         LOG.info(f"DNS record {record_id} deleted successfully.")
@@ -435,9 +431,7 @@ def main() -> Literal[0, 1]:
         )
 
         add_records_with_config = partial(add_dns_record, config=config)
-        delete_records_with_config = partial(
-            delete_dns_record, config=config
-        )
+        delete_records_with_config = partial(delete_dns_record, config=config)
 
         execute_dns_changes(
             ips_to_add,
