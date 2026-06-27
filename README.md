@@ -17,7 +17,6 @@ A lightweight, dependency-free Python script that automatically updates your Clo
 
 - A Linux system using NetworkManager.
 - Python 3.6+ installed.
-- The `iproute2` package (which provides the `ip` command), which is standard on most modern Linux distributions.
 - A Cloudflare account and a domain managed by it.
 
 ## Installation
