@@ -404,11 +404,21 @@ def execute_dns_changes(
 def main() -> Literal[0, 1]:
     """Main function"""
     try:
-        interface, _, is_debug, config_path = parse_args()
+        interface, nm_action, is_debug, config_path = parse_args()
         setup_logging(is_debug)
+
+        # Only dhcp change and interface up/down events change IP addresses
+        valid_events = ["dhcp4-change", "dhcp6-change", "up", "down"]
+        if nm_action not in valid_events:
+            LOG.warning(
+                f"{nm_action} is not a addresses changing event, skipping ddns update"
+            )
+            return 0
+
         if not is_debug:
-            LOG.info("Waiting for network to stabilize... 3s")
-            sleep(3)  # wait for the network to be fully up
+            sleep_time = 3
+            LOG.info(f"Waiting for network to stabilize... {sleep_time}s")
+            sleep(sleep_time)  # wait for the network to be fully up
 
         config = load_config(config_path)
         target_ips = set(get_global_ip_addresses(interface))
