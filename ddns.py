@@ -9,15 +9,18 @@ from dataclasses import dataclass
 from functools import partial
 from http import HTTPStatus
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_interface
-from os import getenv
+from os import environ
 from pathlib import Path
 from sys import exit, stdout
+from time import sleep
 from typing import TYPE_CHECKING, override
 from urllib import error, parse, request
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any, Literal
+
+type IPAddress = IPv4Address | IPv6Address
 
 
 @dataclass
@@ -73,7 +76,10 @@ def setup_logging(is_debug: bool) -> None:
     LOG.debug("Debug mode is enabled.")
 
 
-def parse_args(args: list[str] | None = None) -> tuple[str, str, bool, Path]:
+def parse_args(
+    args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[str, str, bool, Path]:
     """Parse Command Line Args
 
     Args:
@@ -86,6 +92,9 @@ def parse_args(args: list[str] | None = None) -> tuple[str, str, bool, Path]:
             - is_debug (bool): True if DEBUG environment variable is set to "1".
             - config_path (Path): Path to the configuration file.
     """
+    if not env:
+        env = dict(environ)
+
     parser = ArgumentParser(
         prog="ddns.py",
         usage="ddns.py INTERFACE ACTION",
@@ -103,13 +112,14 @@ def parse_args(args: list[str] | None = None) -> tuple[str, str, bool, Path]:
         help="NetworkManager action to trigger the script.",
     )
     parsed = parser.parse_args(args)
-    is_debug = getenv("DEBUG") == "1"
+    is_debug = env.get("DEBUG") == "1"
     config_path = (
-        "/etc/NetworkManager/dispatcher.d/ddns/config.json"
+        Path("/etc/NetworkManager/dispatcher.d/ddns/config.json")
         if not is_debug
-        else "./ddns/config.json"  # use a local config file for debugging
+        else Path("./ddns/config.json")  # use a local config file for debugging
     )
-    return parsed.INTERFACE.strip(), parsed.ACTION.strip(), is_debug, Path(config_path)
+    LOG.debug(f"config path is {config_path!s}")
+    return parsed.INTERFACE.strip(), parsed.ACTION.strip(), is_debug, config_path
 
 
 def load_config(config_path: Path = Path("config.json")) -> Config:
@@ -141,7 +151,7 @@ def load_config(config_path: Path = Path("config.json")) -> Config:
 
 def get_global_ip_addresses(
     env: dict[str, str] | None = None,
-) -> list[IPv4Address | IPv6Address]:
+) -> set[IPAddress]:
     """Get global IPv4 and IPv6 addresses from NetworkManager dispatcher env vars.
 
     Reads:
@@ -151,15 +161,13 @@ def get_global_ip_addresses(
         IP6_ADDRESS_N
 
     Returns:
-        list[IPv4Address | IPv6Address]: global IP addresses.
+        set[IPAddress]: global IP addresses.
     """
 
     if env is None:
-        from os import environ
-
         env = dict(environ)
 
-    global_ip_addresses: list[IPv4Address | IPv6Address] = []
+    global_ip_addresses: set[IPAddress] = set()
 
     for version in (4, 6):
         ip_count = f"IP{version}_NUM_ADDRESSES"
@@ -188,7 +196,7 @@ def get_global_ip_addresses(
             local_ip = iface_addr.ip
 
             if local_ip.is_global:
-                global_ip_addresses.append(local_ip)
+                global_ip_addresses.add(local_ip)
 
     # Warn if no global IPv4 or IPv6 address is found
     if not any(ip_address(ip).version == 4 for ip in global_ip_addresses):  # noqa: PLR2004
@@ -196,7 +204,7 @@ def get_global_ip_addresses(
     if not any(ip_address(ip).version == 6 for ip in global_ip_addresses):  # noqa: PLR2004
         LOG.warning("No global IPv6 address found.")
 
-    return global_ip_addresses
+    return set(global_ip_addresses)
 
 
 def build_api_request(
@@ -347,29 +355,31 @@ def delete_dns_record(record_id: str, config: Config) -> bool:
 
 
 def determine_dns_actions(
-    all_dns_records: list[dict[str, Any]], desired_ips: set[IPv4Address | IPv6Address]
-) -> tuple[set[IPv4Address | IPv6Address], set[str]]:
+    all_dns_records: list[dict[str, Any]], desired_ips: set[IPAddress]
+) -> tuple[set[IPAddress], set[str]]:
     """Determine which DNS records need to be added or removed.
 
     Args:
         all_dns_records (list[dict[str, Any]]): List of current DNS records.
-        desired_ips (set[IPv4Address | IPv6Address]): Set of desired IP addresses.
+        desired_ips (set[IPAddress]): Set of desired IP addresses.
 
     Returns:
-        tuple[set[IPv4Address | IPv6Address], set[str]]: A tuple containing two sets:
-            - ips_to_add (set[IPv4Address | IPv6Address]): IP addresses that need to be added as DNS records
+        tuple[set[IPAddress], set[str]]: A tuple containing two sets:
+            - ips_to_add (set[IPAddress]): IP addresses that need to be added as DNS records
             - record_ids_to_remove (set[str]): DNS record ids that need to be removed from DNS records
     """
-    current_ips: set[str] = {record["content"] for record in all_dns_records}
+    current_ips = set({ip_address(record["content"]) for record in all_dns_records})
 
     ips_to_add = desired_ips - current_ips
     ips_to_remove = current_ips - desired_ips
-    record_ids_to_remove: set[str] = {record["id"] for record in all_dns_records if record["content"] in ips_to_remove}
+    record_ids_to_remove: set[str] = {
+        record["id"] for record in all_dns_records if ip_address(record["content"]) in ips_to_remove
+    }
     return ips_to_add, record_ids_to_remove
 
 
 def execute_dns_changes(
-    ips_to_add: set[IPv4Address | IPv6Address],
+    ips_to_add: set[IPAddress],
     record_ids_to_remove: set[str],
     add_record_func: Callable[[str], bool],
     delete_record_func: Callable[[str], bool],
@@ -377,7 +387,7 @@ def execute_dns_changes(
     """Execute DNS changes in parallel using ProcessPoolExecutor.
 
     Args:
-        ips_to_add (set[IPv4Address | IPv6Address]): Set of IP addresses to add as DNS records.
+        ips_to_add (set[IPAddress]): Set of IP addresses to add as DNS records.
         record_ids_to_remove (set[str]): Set of DNS record IDs to remove.
         add_record_func (Callable[[str], bool]): Function to add a DNS record.
         delete_record_func (Callable[[str], bool]): Function to delete a DNS record.
@@ -386,10 +396,10 @@ def execute_dns_changes(
         LOG.info("No DNS changes needed.")
         return
     # IPv4Address and IPv6Address cannot be serialized into json, so cast them as str
-    _ips_to_add = map(str, ips_to_add)
+    _ips_to_add = list(map(str, ips_to_add))
     LOG.info("IP addresses have been changed, updating DNS records...")
-    LOG.debug(f"IPs to add: {', '.join(_ips_to_add)}")
-    LOG.debug(f"Record IDs to remove: {', '.join(record_ids_to_remove)}")
+    LOG.info(f"IPs to add: {', '.join(_ips_to_add)}")
+    LOG.info(f"Record IDs to remove: {', '.join(record_ids_to_remove)}")
     with ProcessPoolExecutor() as pool:
         if ips_to_add:
             add_op_results = pool.map(add_record_func, _ips_to_add)
@@ -416,14 +426,17 @@ def main() -> Literal[0, 1]:
         setup_logging(is_debug)
 
         # Only dhcp change and interface up/down events change IP addresses
-        valid_events = ["dhcp4-change", "dhcp6-change", "up", "down"]
+        valid_events = ["dhcp4-change", "dhcp6-change", "up", "down", "connectivity-change"]
         if nm_action not in valid_events:
             LOG.warning(f"{nm_action} is not a addresses changing event, skipping ddns update")
             return 0
-        LOG.info(f"{interface} is {nm_action}.")
+        if interface:
+            LOG.info(f"{nm_action.replace('-', ' ')} event detected on {interface}.")
+        else:
+            LOG.info(f"{nm_action.replace('-', ' ')} event detected.")
 
         config = load_config(config_path)
-        target_ips = set(get_global_ip_addresses())
+        target_ips = get_global_ip_addresses()
         if not target_ips:
             LOG.warning("No global IP addresses found, exiting.")
             return 0
@@ -442,6 +455,10 @@ def main() -> Literal[0, 1]:
         add_records_with_config = partial(add_dns_record, config=config)
         delete_records_with_config = partial(delete_dns_record, config=config)
 
+        if not is_debug:
+            wait_seconds = 3
+            LOG.info(f"Waiting {wait_seconds} seconds before updating.")
+            sleep(3)
         execute_dns_changes(
             ips_to_add,
             record_ids_to_remove,
